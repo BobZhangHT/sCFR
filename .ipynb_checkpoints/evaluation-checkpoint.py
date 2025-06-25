@@ -195,9 +195,11 @@ def collect_all_metrics(sim_data, posterior_samples, benchmarks_r_t, benchmark_c
 
 
     # --- Metrics for ITS Factual and Counterfactual r_t ---
-    true_rcf_0_t_analysis = sim_data["true_rcf_0_t"][:T_analyze]
-    metrics["mae_rt_its"] = float(calculate_mae_rt(true_r_0_t_analysis, its_results["its_factual_mean"][:T_analyze]))
-    metrics["mae_rcf_its"] = float(calculate_mae_rt(true_rcf_0_t_analysis, its_results["its_counterfactual_mean"][:T_analyze]))
+    its_factual_analysis = its_results["its_factual_mean"][:T_analyze]
+    its_cf_analysis = its_results["its_counterfactual_mean"][:T_analyze]
+    
+    metrics["mae_rt_its"] = float(calculate_mae_rt(true_r_0_t_analysis, its_factual_analysis))
+    metrics["mae_rcf_its"] = float(calculate_mae_rt(true_rcf_0_t_analysis, its_cf_analysis))
 
     metrics["mciw_rt_its"] = float(calculate_mciw_rt(its_results["its_factual_lower"][:T_analyze], its_results["its_factual_upper"][:T_analyze]))
     metrics["mciw_rcf_its"] = float(calculate_mciw_rt(its_results["its_counterfactual_lower"][:T_analyze], its_results["its_counterfactual_upper"][:T_analyze]))
