@@ -8,13 +8,25 @@ import numpy as np
 # ----------------------------------------------------------------------------
 # General Simulation Parameters
 # ----------------------------------------------------------------------------
-NUM_MONTE_CARLO_RUNS = 10
+NUM_MONTE_CARLO_RUNS = 2
 T_ANALYSIS_LENGTH = 200       # << NEW: The period we actually care about evaluating
 T_SIMULATION_BUFFER = 60      # << NEW: Simulate for this many extra days
 T_SERIES_LENGTH_SIM = T_ANALYSIS_LENGTH + T_SIMULATION_BUFFER # << NEW: Total days to simulate
 
 GLOBAL_BASE_SEED = 2025
-NUM_CORES_TO_USE = 10#os.cpu_count() - 1 if os.cpu_count() > 1 else 1
+NUM_CORES_TO_USE = 2#os.cpu_count() - 1 if os.cpu_count() > 1 else 1
+
+PENALTY_GRID_ALPHA = [0.01, 0.1, 1, 10, 100]
+PENALTY_GRID_GAMMA_LAMBDA = [0.01, 0.1, 1, 10, 100]
+N_BOOTSTRAPS_ITS = 200
+
+OVERWRITE_EXISTING_RESULTS = True  # If True, will re-run all simulations regardless of saved files.
+                                   # If False, will skip runs with existing metric files.
+
+# USE_ORTHOGONALIZATION = True # If True, applies orthogonalization to the sCFR model
+#                              # to improve parameter identifiability.
+
+COMPARE_SCFR_AND_SCFR_O = True # If True, will fit both the standard and orthogonalized sCFR models.
 
 # ----------------------------------------------------------------------------
 # Data Generation Process (DGP) Parameters
@@ -112,5 +124,6 @@ OUTPUT_DIR_PLOTS = os.path.join(OUTPUT_DIR_BASE, "plots/")
 OUTPUT_DIR_TABLES = os.path.join(OUTPUT_DIR_BASE, "tables/")
 OUTPUT_DIR_RESULTS_CSV = os.path.join(OUTPUT_DIR_BASE, "results_csv/") # For aggregated and per-scenario CSVs
 OUTPUT_DIR_POSTERIOR_SAMPLES = os.path.join(OUTPUT_DIR_BASE, "posterior_samples_raw/") # For full MCMC samples
+OUTPUT_DIR_BENCHMARK_RESULTS = os.path.join(OUTPUT_DIR_BASE, "benchmarks_results/")
 OUTPUT_DIR_POSTERIOR_SUMMARIES = os.path.join(OUTPUT_DIR_BASE, "posterior_summaries/") # For mean/quantiles
 OUTPUT_DIR_RUN_METRICS_JSON = os.path.join(OUTPUT_DIR_BASE, "run_metrics_json/") # For individual run metrics (checkpointing)

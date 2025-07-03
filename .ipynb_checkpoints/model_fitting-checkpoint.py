@@ -157,7 +157,7 @@ def fit_proposed_model(sim_data, jax_prng_key, use_orthogonalization=False):
     Z_for_sampler = Z_orig
 
     # --- NEW: Conditional Orthogonalization Step ---
-    if use_orthogonalization and sim_data["num_interventions_true_K"] > 0:
+    if config.USE_ORTHOGONALIZATION and sim_data["num_interventions_true_K"] > 0:
         print("    -> Applying orthogonalization to sCFR model predictors.")
         try:
             # Using pseudo-inverse (pinv) for numerical stability.

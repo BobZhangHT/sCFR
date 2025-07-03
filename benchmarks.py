@@ -2,9 +2,13 @@
 
 import numpy as np
 import pandas as pd
-from scipy.stats import norm, beta_dist
+from scipy.stats import norm, beta as beta_dist
 from scipy.special import logit, expit as sigmoid
 from scipy.optimize import minimize
+from sklearn.model_selection import TimeSeriesSplit
+from joblib import Parallel, delayed
+import itertools
+import config
 
 def construct_Q_matrix(c_t, f_s, T_sim):
     """Constructs the convolution matrix Q from cases and delay distribution."""
@@ -127,115 +131,291 @@ def calculate_benchmark_cis_with_bayesian(d_t, c_t, f_s, alpha=0.05):
         "aCFR_cumulative_upper": np.nan_to_num(ci_aCFR_upper)
     }
 
-def calculate_its_with_poisson_mle(d_t, c_t, f_s, Bm, intervention_times_abs, intervention_signs, alpha=0.05, n_mc_ci=500):
+def calculate_its_with_penalized_mle(d_t, c_t, f_s, Bm, intervention_times_abs, intervention_signs, alpha=0.05):
     """
-    Estimates CFR and parameters using an ITS model with a Poisson likelihood (MLE).
-
-    Args:
-        d_t, c_t, f_s (np.ndarray): Daily deaths, cases, and delay distribution.
-        Bm (np.ndarray): The B-spline basis matrix for the baseline trend.
-        intervention_times_abs (np.ndarray): Absolute day numbers for intervention starts.
-        intervention_signs (np.ndarray): The signs of the intervention effects.
-        alpha (float): Significance level for the CIs (e.g., 0.05 for 95% CI).
-        n_mc_ci (int): Number of Monte Carlo samples for generating prediction CIs.
-
-    Returns:
-        dict: A comprehensive dictionary of all point estimates and CI bounds.
+    [LATEST BENCHMARK] Estimates parameters and curves using a Penalized Poisson MLE ITS model.
+    This version correctly handles scenarios with K=0 interventions.
     """
     T, K_spline = Bm.shape
     K_interventions = len(intervention_times_abs)
     num_params = K_spline + 2 * K_interventions
 
-    # Pre-calculate the Q matrix and Z matrix, which are fixed for the optimization
     Q_matrix = construct_Q_matrix(c_t, f_s, T)
     Z_its = np.zeros((T, K_interventions))
     t_array = np.arange(T)
-    for k in range(K_interventions):
-        Z_its[:, k] = np.maximum(0, t_array - intervention_times_abs[k])
+    if K_interventions > 0:
+        for k in range(K_interventions):
+            Z_its[:, k] = np.maximum(0, t_array - intervention_times_abs[k])
 
-    def negative_log_likelihood(params, Bm, Z, d_t, Q, intervention_signs):
-        """The objective function to minimize (Poisson Negative Log-Likelihood)."""
+    def objective_func(params, Bm, Z, d_t_data, Q, signs, p_alpha, p_gamma):
+        """The penalized negative Poisson log-likelihood objective function."""
         alphas = params[:K_spline]
-        gammas = params[K_spline : K_spline + K_interventions]
-        lambdas = params[K_spline + K_interventions:]
-
-        betas = np.exp(gammas) * intervention_signs
-        intervention_effect = np.sum((1 - np.exp(-lambdas * Z)) * betas, axis=1)
         baseline_trend = Bm @ alphas
+        intervention_effect = 0.0
+        penalty2 = 0.0
         
+        # ** FIX APPLIED HERE: Conditional logic for parameter unpacking and calculation **
+        if Z.shape[1] > 0:
+            gammas = params[K_spline : K_spline + K_interventions]
+            lambdas = params[K_spline + K_interventions:]
+            
+            betas = np.exp(gammas) * signs
+            intervention_effect = np.sum((1 - np.exp(-lambdas * Z)) * betas, axis=1)
+            
+            penalty2 = p_gamma * np.sum(gammas**2)
+
         r_t_pred = sigmoid(baseline_trend + intervention_effect)
-        mu_pred = np.maximum(Q @ r_t_pred, 1e-9) # Ensure mean is positive
-
-        # Poisson negative log-likelihood: sum(mu - d*log(mu))
-        # Add a small epsilon to d_t * log(mu_pred) for stability if mu_pred is zero
-        log_likelihood = np.sum(d_t * np.log(mu_pred + 1e-9) - mu_pred)
+        mu_pred = np.maximum(Q @ r_t_pred, 1e-9)
+        nll = -np.sum(d_t_data * np.log(mu_pred) - mu_pred)
         
-        # We minimize the negative of the log-likelihood
-        return -log_likelihood
+        penalty1 = p_alpha * np.sum(np.abs(np.diff(alphas, n=2)))
+        
+        return nll + penalty1 + penalty2
 
-    # Initial guesses for parameters
+    # --- Step 1: Tune penalty strength using Grid-Search Time-Series CV ---
+    p_alpha_grid = config.PENALTY_GRID_ALPHA
+    p_gamma_grid = config.PENALTY_GRID_GAMMA_LAMBDA
+    tscv = TimeSeriesSplit(n_splits=3)
+    cv_scores = {}
+
     p0 = np.zeros(num_params)
-    if K_interventions > 0: p0[K_spline + K_interventions:] = 0.1 # Initial guess for lambdas
+    if K_interventions > 0: p0[K_spline + K_interventions:] = 0.1
+    bounds = [(None, None)] * (K_spline + K_interventions) + [(1e-6, None)] * K_interventions
 
-    # --- Fit the model using scipy.optimize.minimize ---
-    result = minimize(
-        negative_log_likelihood, 
-        x0=p0, 
-        args=(Bm, Z_its, d_t, Q_matrix, intervention_signs), 
-        method='BFGS',
-        options={'maxiter': 5000, 'disp': False}
+    for p_alpha, p_gamma in itertools.product(p_alpha_grid, p_gamma_grid):
+        if K_interventions == 0 and p_gamma != p_gamma_grid[0]:
+            continue
+        
+        fold_scores = []
+        for train_idx, test_idx in tscv.split(t_array):
+            res_cv = minimize(objective_func, x0=p0, 
+                              args=(Bm[train_idx], Z_its[train_idx], d_t[train_idx], Q_matrix[np.ix_(train_idx, train_idx)], intervention_signs, p_alpha, p_gamma),
+                              method='L-BFGS-B', bounds=bounds)
+            if res_cv.success:
+                score = objective_func(res_cv.x, Bm[test_idx], Z_its[test_idx], d_t[test_idx], Q_matrix[np.ix_(test_idx, test_idx)], intervention_signs, 0, 0)
+                fold_scores.append(score)
+        cv_scores[(p_alpha, p_gamma)] = np.mean(fold_scores) if fold_scores else np.inf
+    
+    best_penalties = min(cv_scores, key=cv_scores.get) if cv_scores else (1.0, 1.0)
+    best_penalty_alpha, best_penalty_gamma = best_penalties
+
+    # --- Step 2: Fit final model ---
+    final_result = minimize(
+        objective_func, x0=p0, 
+        args=(Bm, Z_its, d_t, Q_matrix, intervention_signs, best_penalty_alpha, best_penalty_gamma), 
+        method='L-BFGS-B', bounds=bounds
     )
-    
-    popt = result.x if result.success else np.full(num_params, np.nan)
-    # The inverse of the Hessian matrix approximates the covariance matrix
-    pcov = result.hess_inv if hasattr(result, 'hess_inv') and isinstance(result.hess_inv, np.ndarray) else np.full((num_params, num_params), np.nan)
+    popt = final_result.x if final_result.success else np.full(num_params, np.nan)
 
-    # --- Calculate Parameter CIs ---
-    perr = np.sqrt(np.diag(pcov)) if not np.any(np.isnan(pcov)) else np.full_like(popt, np.nan)
-    z_crit = norm.ppf(1 - alpha / 2)
+    # --- Step 3: Parametric Bootstrap for CIs ---
+    alphas_hat = popt[:K_spline]
+    baseline_trend_hat = Bm @ alphas_hat
+    intervention_effect_hat = 0.0
+    gammas_hat, lambdas_hat = np.array([]), np.array([])
     
-    gammas_est = popt[K_spline : K_spline + K_interventions]
-    lambdas_est = popt[K_spline + K_interventions:]
-    gammas_se, lambdas_se = perr[K_spline : K_spline + K_interventions], perr[K_spline + K_interventions:]
+    if K_interventions > 0:
+        gammas_hat = popt[K_spline : K_spline + K_interventions]
+        lambdas_hat = popt[K_spline + K_interventions:]
+        betas_hat = np.exp(gammas_hat) * intervention_signs
+        intervention_effect_hat = np.sum((1 - np.exp(-lambdas_hat * Z_its)) * betas_hat, axis=1)
     
-    # --- Calculate Prediction CIs via Monte Carlo ---
-    pred_factual_mc = np.full((n_mc_ci, T), np.nan)
-    pred_counterfactual_mc = np.full((n_mc_ci, T), np.nan)
+    r_t_hat = sigmoid(baseline_trend_hat + intervention_effect_hat)
+    mu_hat = np.maximum(Q_matrix @ r_t_hat, 1e-9)
+    
+    def bootstrap_iteration(seed):
+        rng_boot = np.random.default_rng(seed)
+        d_t_boot = rng_boot.poisson(mu_hat)
+        boot_res = minimize(objective_func, x0=popt, 
+                            args=(Bm, Z_its, d_t_boot, Q_matrix, intervention_signs, best_penalty_alpha, best_penalty_gamma),
+                            method='L-BFGS-B', bounds=bounds)
+        return boot_res.x if boot_res.success else np.full(num_params, np.nan)
+    
+    boot_seeds = np.random.randint(0, 1e6, size=config.N_BOOTSTRAPS_ITS)
+    boot_params = Parallel(n_jobs=-1)(delayed(bootstrap_iteration)(seed) for seed in boot_seeds)
+    boot_params = np.array(boot_params)
 
-    if not np.any(np.isnan(pcov)):
-        try:
-            param_samples = np.random.multivariate_normal(popt, pcov, size=n_mc_ci)
-            for i in range(n_mc_ci):
-                p_sample = param_samples[i, :]
-                alphas_s, gammas_s, lambdas_s = p_sample[:K_spline], p_sample[K_spline:K_spline+K_interventions], p_sample[K_spline+K_interventions:]
-                
-                betas_s = np.exp(gammas_s) * intervention_signs
-                intervention_effect_s = np.sum((1 - np.exp(-lambdas_s * Z_its)) * betas_s, axis=1)
-                baseline_trend_s = Bm @ alphas_s
-                
-                pred_factual_mc[i, :] = sigmoid(baseline_trend_s + intervention_effect_s)
-                pred_counterfactual_mc[i, :] = sigmoid(baseline_trend_s)
-        except (np.linalg.LinAlgError, ValueError):
-            print(f"Warning: NLS Covariance matrix was not valid for CI sampling.")
-
-    # --- Final Point Estimates ---
-    alphas_hat, gammas_hat, lambdas_hat = popt[:K_spline], popt[K_spline:K_spline+K_interventions], popt[K_spline+K_interventions:]
-    betas_hat = np.exp(gammas_hat) * intervention_signs
+    # --- Step 4: Calculate final estimates and CIs ---
+    param_ci_lower = np.nanpercentile(boot_params, (alpha/2)*100, axis=0)
+    param_ci_upper = np.nanpercentile(boot_params, (1-alpha/2)*100, axis=0)
     
-    factual_mean = sigmoid(Bm @ alphas_hat + np.sum((1 - np.exp(-lambdas_hat * Z_its)) * betas_hat, axis=1))
-    counterfactual_mean = sigmoid(Bm @ alphas_hat)
+    pred_factual_mc = np.full((config.N_BOOTSTRAPS_ITS, T), np.nan)
+    pred_counterfactual_mc = np.full((config.N_BOOTSTRAPS_ITS, T), np.nan)
+    
+    for i, p_sample in enumerate(boot_params):
+        if np.any(np.isnan(p_sample)): continue
+        alphas_s = p_sample[:K_spline]
+        baseline_trend_s = Bm @ alphas_s
+        intervention_effect_s = 0.0
+        if K_interventions > 0:
+            gammas_s = p_sample[K_spline : K_spline + K_interventions]
+            lambdas_s = p_sample[K_spline + K_interventions:]
+            betas_s = np.exp(gammas_s) * intervention_signs
+            intervention_effect_s = np.sum((1 - np.exp(-lambdas_s * Z_its)) * betas_s, axis=1)
+        
+        pred_factual_mc[i, :] = sigmoid(baseline_trend_s + intervention_effect_s)
+        pred_counterfactual_mc[i, :] = sigmoid(baseline_trend_s)
     
     return {
-        "its_factual_mean": factual_mean,
-        "its_factual_lower": np.percentile(pred_factual_mc, (alpha/2)*100, axis=0),
-        "its_factual_upper": np.percentile(pred_factual_mc, (1-alpha/2)*100, axis=0),
-        "its_counterfactual_mean": counterfactual_mean,
-        "its_counterfactual_lower": np.percentile(pred_counterfactual_mc, (alpha/2)*100, axis=0),
-        "its_counterfactual_upper": np.percentile(pred_counterfactual_mc, (1-alpha/2)*100, axis=0),
+        "its_factual_mean": sigmoid(Bm @ alphas_hat + intervention_effect_hat),
+        "its_factual_lower": np.nanpercentile(pred_factual_mc, (alpha/2)*100, axis=0),
+        "its_factual_upper": np.nanpercentile(pred_factual_mc, (1-alpha/2)*100, axis=0),
+        "its_counterfactual_mean": sigmoid(Bm @ alphas_hat),
+        "its_counterfactual_lower": np.nanpercentile(pred_counterfactual_mc, (alpha/2)*100, axis=0),
+        "its_counterfactual_upper": np.nanpercentile(pred_counterfactual_mc, (1-alpha/2)*100, axis=0),
         "its_gamma_est": gammas_hat,
-        "its_gamma_lower": gammas_hat - z_crit * gammas_se,
-        "its_gamma_upper": gammas_hat + z_crit * gammas_se,
+        "its_gamma_lower": param_ci_lower[K_spline : K_spline + K_interventions] if K_interventions > 0 else np.array([]),
+        "its_gamma_upper": param_ci_upper[K_spline : K_spline + K_interventions] if K_interventions > 0 else np.array([]),
         "its_lambda_est": lambdas_hat,
-        "its_lambda_lower": lambdas_hat - z_crit * lambdas_se,
-        "its_lambda_upper": lambdas_hat + z_crit * lambdas_se,
+        "its_lambda_lower": param_ci_lower[K_spline + K_interventions:] if K_interventions > 0 else np.array([]),
+        "its_lambda_upper": param_ci_upper[K_spline + K_interventions:] if K_interventions > 0 else np.array([]),
     }
+
+    
+# def calculate_its_with_parametric_bootstrap(d_t, c_t, f_s, Bm, 
+#                                             intervention_times_abs, intervention_signs, 
+#                                             alpha=0.05, n_bootstraps=200):
+#     """
+#     Estimates CFR and parameters using an ITS model with a Poisson likelihood (MLE).
+
+#     Args:
+#         d_t, c_t, f_s (np.ndarray): Daily deaths, cases, and delay distribution.
+#         Bm (np.ndarray): The B-spline basis matrix for the baseline trend.
+#         intervention_times_abs (np.ndarray): Absolute day numbers for intervention starts.
+#         intervention_signs (np.ndarray): The signs of the intervention effects.
+#         alpha (float): Significance level for the CIs (e.g., 0.05 for 95% CI).
+#         n_bootstraps (int): Number of bootstrapping samples for generating prediction CIs.
+
+#     Returns:
+#         dict: A comprehensive dictionary of all point estimates and CI bounds.
+#     """
+
+#     T, K_spline = Bm.shape
+#     K_interventions = len(intervention_times_abs)
+#     num_params = K_spline + 2 * K_interventions
+    
+#     Q_matrix = construct_Q_matrix(c_t, f_s, T)
+#     Z_its = np.zeros((T, K_interventions))
+#     t_array = np.arange(T)
+#     if K_interventions > 0:
+#         for k in range(K_interventions):
+#             Z_its[:, k] = np.maximum(0, t_array - intervention_times_abs[k])
+    
+#     def objective_func(params, Bm, Z, d_t_data, Q, signs, p_alpha, p_gamma):
+#         """The penalized negative Poisson log-likelihood objective function."""
+#         alphas = params[:K_spline]
+#         baseline_trend = Bm @ alphas
+#         intervention_effect = 0.0
+#         penalty2 = 0.0
+        
+#         # ** FIX APPLIED HERE: Conditional logic for parameter unpacking and calculation **
+#         if Z.shape[1] > 0:
+#             gammas = params[K_spline : K_spline + K_interventions]
+#             lambdas = params[K_spline + K_interventions:]
+            
+#             betas = np.exp(gammas) * signs
+#             intervention_effect = np.sum((1 - np.exp(-lambdas * Z)) * betas, axis=1)
+            
+#             penalty2 = p_gamma * np.sum(gammas**2)
+        
+#         r_t_pred = sigmoid(baseline_trend + intervention_effect)
+#         mu_pred = np.maximum(Q @ r_t_pred, 1e-9)
+#         nll = -np.sum(d_t_data * np.log(mu_pred) - mu_pred)
+
+#         penalty1 = p_alpha * np.sum(np.abs(np.diff(alphas, n=2)))
+
+#         return nll + penalty1 + penalty2
+    
+#     # --- Step 1: Fit final model on all original data to get point estimates (popt) ---
+#     penalty_grid = [0.01, 0.1, 1, 10, 100]
+#     tscv = TimeSeriesSplit(n_splits=3)
+#     cv_scores = {}
+    
+#     p0 = np.zeros(num_params)
+#     if K_interventions > 0: p0[K_spline + K_interventions:] = 0.1
+#     bounds = [(None, None)] * (K_spline + K_interventions) + [(1e-6, None)] * K_interventions
+
+#     for p_alpha, p_gamma in itertools.product(penalty_grid,penalty_grid):
+#         if K_interventions == 0 and (p_gamma != penalty_grid[0]):
+#             continue
+#         fold_scores = []
+#         for train_idx, test_idx in tscv.split(t_array):
+#             res_cv = minimize(objective_func, x0=p0, 
+#                               args=(Bm[train_idx], Z_its[train_idx], d_t[train_idx], Q_matrix[np.ix_(train_idx, train_idx)], intervention_signs, p_alpha, p_gamma),
+#                               method='L-BFGS-B', bounds=bounds)
+#             if res_cv.success:
+#                 score = objective_func(res_cv.x, Bm[test_idx], Z_its[test_idx], d_t[test_idx], Q_matrix[np.ix_(test_idx, test_idx)], intervention_signs, 0, 0)
+#                 fold_scores.append(score)
+#         cv_scores[(p_alpha,p_gamma)] = np.mean(fold_scores) if fold_scores else np.inf
+    
+#     best_penalties = min(cv_scores, key=cv_scores.get)
+#     best_penalty_alpha, best_penalty_gamma = best_penalties
+    
+#     final_result = minimize(
+#         objective_func, x0=p0, 
+#         args=(Bm, Z_its, d_t, Q_matrix, intervention_signs, best_penalty_alpha, best_penalty_gamma), 
+#         method='L-BFGS-B', bounds=bounds
+#     )
+#     popt = final_result.x if final_result.success else np.full(num_params, np.nan)
+    
+#     # --- Step 2: Parametric Bootstrap for Confidence Intervals ---
+#     alphas_hat, gammas_hat, lambdas_hat = popt[:K_spline], popt[K_spline:-K_interventions], popt[-K_interventions:]
+#     intervention_effect = 0.0
+#     if K_interventions > 0:
+#         betas_hat = np.exp(gammas_hat) * intervention_signs
+#         intervention_effect = np.sum((1 - np.exp(-lambdas_hat * Z_its)) * betas_hat, axis=1)
+#     r_t_hat = sigmoid(Bm @ alphas_hat + intervention_effect)
+#     mu_hat = np.maximum(Q_matrix @ r_t_hat, 1e-9)
+    
+#     def bootstrap_iteration(seed):
+#         rng_boot = np.random.default_rng(seed)
+#         d_t_boot = rng_boot.poisson(mu_hat)
+#         boot_res = minimize(
+#             objective_func, x0=popt, 
+#             args=(Bm, Z_its, d_t_boot, Q_matrix, intervention_signs, best_penalty_alpha, best_penalty_gamma),
+#             method='L-BFGS-B', bounds=bounds)
+#         return boot_res.x if boot_res.success else np.full(num_params, np.nan)
+    
+#     boot_seeds = np.random.randint(0, 1e6, size=n_bootstraps)
+#     boot_params = Parallel(n_jobs=-1)(delayed(bootstrap_iteration)(seed) for seed in boot_seeds)
+#     boot_params = np.array(boot_params)
+
+#     # --- Step 3: Calculate Prediction CIs via Monte Carlo from the bootstrap parameter distribution ---
+#     param_ci_lower = np.nanpercentile(boot_params, (alpha/2)*100, axis=0)
+#     param_ci_upper = np.nanpercentile(boot_params, (1-alpha/2)*100, axis=0)
+    
+#     pred_factual_mc = np.full((n_bootstraps, T), np.nan)
+#     pred_counterfactual_mc = np.full((n_bootstraps, T), np.nan)
+    
+#     for i, p_sample in enumerate(boot_params):
+#         if np.any(np.isnan(p_sample)): continue
+#         alphas_s, gammas_s, lambdas_s = p_sample[:K_spline], p_sample[K_spline:-K_interventions], p_sample[-K_interventions:]
+#         intervention_effect_s = 0.0
+#         if K_interventions > 0:
+#             betas_s = np.exp(gammas_s) * intervention_signs
+#             intervention_effect_s = np.sum((1 - np.exp(-lambdas_s * Z_its)) * betas_s, axis=1)
+#         baseline_trend_s = Bm @ alphas_s
+        
+#         pred_factual_mc[i, :] = sigmoid(baseline_trend_s + intervention_effect_s)
+#         pred_counterfactual_mc[i, :] = sigmoid(baseline_trend_s)
+
+#     factual_ci_lower = np.nanpercentile(pred_factual_mc, (alpha/2)*100, axis=0)
+#     factual_ci_upper = np.nanpercentile(pred_factual_mc, (1-alpha/2)*100, axis=0)
+#     cf_ci_lower = np.nanpercentile(pred_counterfactual_mc, (alpha/2)*100, axis=0)
+#     cf_ci_upper = np.nanpercentile(pred_counterfactual_mc, (1-alpha/2)*100, axis=0)
+    
+#     its_results = {
+#         "its_factual_mean": r_t_hat,
+#         "its_factual_lower": factual_ci_lower,
+#         "its_factual_upper": factual_ci_upper,
+#         "its_counterfactual_mean": sigmoid(Bm @ alphas_hat),
+#         "its_counterfactual_lower": cf_ci_lower,
+#         "its_counterfactual_upper": cf_ci_upper,
+#         "its_gamma_est": gammas_hat,
+#         "its_gamma_lower": param_ci_lower[K_spline:-K_interventions],
+#         "its_gamma_upper": param_ci_upper[K_spline:-K_interventions],
+#         "its_lambda_est": lambdas_hat,
+#         "its_lambda_lower": param_ci_lower[-K_interventions:],
+#         "its_lambda_upper": param_ci_upper[-K_interventions:],
+#     }
+
+#     return its_results
