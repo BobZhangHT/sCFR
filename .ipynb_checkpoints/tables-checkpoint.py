@@ -16,16 +16,15 @@ def format_mean_std(mean_val, std_val, is_coverage=False):
 
 def generate_rt_metrics_table(results_df_summary, output_dir):
     """
-    Generates a summary table for r_t metrics, comparing sCFR, sCFR-O, and benchmarks.
+    Generates a summary table for r_t metrics.
     """
     table_rows = []
     # Define all methods and their corresponding suffixes in the results data
     methods = {
-        "sCFR": "sCFR", 
-        "sCFR-O": "sCFR_O",
-        "cCFR": "cCFR_cumulative", 
-        "aCFR": "aCFR_cumulative",
-        "ITS": "its"
+        "sCFR": "_sCFR", 
+        "cCFR": "_cCFR_cumulative", 
+        "aCFR": "_aCFR_cumulative",
+        "ITS": "_its"
     }
 
     for scen_conf in config.SCENARIOS:
@@ -39,12 +38,11 @@ def generate_rt_metrics_table(results_df_summary, output_dir):
                 metric_name_display = metric_base.upper().replace("_", "_")
                 table_col_name = f"{table_prefix} {metric_name_display}"
                 
-                # Benchmarks do not have counterfactual (rcf) metrics
                 if table_prefix in ["cCFR", "aCFR"] and "rcf" in metric_base:
                     continue
 
-                mean_col = f"{metric_base}_{data_suffix}_mean"
-                std_col = f"{metric_base}_{data_suffix}_std"
+                mean_col = f"{metric_base}{data_suffix}_mean"
+                std_col = f"{metric_base}{data_suffix}_std"
                 
                 row_data[table_col_name] = format_mean_std(
                     scen_res[mean_col].iloc[0] if mean_col in scen_res else np.nan,
@@ -53,22 +51,17 @@ def generate_rt_metrics_table(results_df_summary, output_dir):
                 )
         table_rows.append(row_data)
         
-    if not table_rows:
-        print("Warning: No data rows were generated for the r_t metrics table.")
-        return
-        
+    if not table_rows: return
     df_table = pd.DataFrame(table_rows)
     
-    # Define the desired column order
+    # Define the desired column order, excluding sCFR-O
     cols_ordered = [ "Scenario ID", 
                     "sCFR MAE_RT", "sCFR MCIW_RT", "sCFR MCIC_RT", 
-                    "sCFR_O MAE_RT", "sCFR_O MCIW_RT", "sCFR_O MCIC_RT", 
-                    "sCFR MAE_RCF", "sCFR MCIW_RCF", "sCFR MCIC_RCF", 
-                    "sCFR_O MAE_RCF", "sCFR_O MCIW_RCF", "sCFR_O MCIC_RCF",
-                    "cCFR MAE_RT", "cCFR MCIW_RT", "cCFR MCIC_RT", 
-                    "aCFR MAE_RT", "aCFR MCIW_RT", "aCFR MCIC_RT",
+                    "sCFR MAE_RCF", "sCFR MCIW_RCF", "sCFR MCIC_RCF",
                     "ITS MAE_RT", "ITS MCIW_RT", "ITS MCIC_RT",
-                    "ITS MAE_RCF", "ITS MCIW_RCF", "ITS MCIC_RCF" ]
+                    "ITS MAE_RCF", "ITS MCIW_RCF", "ITS MCIC_RCF",
+                    "cCFR MAE_RT", "cCFR MCIW_RT", "cCFR MCIC_RT", 
+                    "aCFR MAE_RT", "aCFR MCIW_RT", "aCFR MCIC_RT" ]
     
     cols_to_use = [col for col in cols_ordered if col in df_table.columns]
     df_table_reordered = df_table[cols_to_use]
@@ -94,7 +87,6 @@ def generate_param_metrics_table(results_df_summary, output_dir):
     # Define the models and their suffixes in the results data
     models_to_compare = {
         "sCFR": "_sCFR",
-        "sCFR-O": "_sCFR_O",
         "ITS": "_its"
     }
 

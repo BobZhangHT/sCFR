@@ -23,11 +23,6 @@ N_BOOTSTRAPS_ITS = 200
 OVERWRITE_EXISTING_RESULTS = True  # If True, will re-run all simulations regardless of saved files.
                                    # If False, will skip runs with existing metric files.
 
-# USE_ORTHOGONALIZATION = True # If True, applies orthogonalization to the sCFR model
-#                              # to improve parameter identifiability.
-
-COMPARE_SCFR_AND_SCFR_O = True # If True, will fit both the standard and orthogonalized sCFR models.
-
 # ----------------------------------------------------------------------------
 # Data Generation Process (DGP) Parameters
 # ----------------------------------------------------------------------------
@@ -42,7 +37,7 @@ SPLINE_ORDER = 4      # 4 for cubic B-splines.
 
 # I.i.d. Random Effect (eta_t) in the true DGP
 # Set to 0 if the model being tested does not explicitly account for this term.
-ETA_SIGMA_TRUE = 0.1 # Standard deviation of the random effect on the logit scale.
+ETA_SIGMA_TRUE = 0.0 # Standard deviation of the random effect on the logit scale.
 
 # Confirmed Cases (c_t) Generation
 # Defines a deterministic baseline shape which is then modulated by intervention effects.

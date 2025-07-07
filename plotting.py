@@ -19,13 +19,13 @@ plt.rcParams.update({
 
 def plot_cfr_timeseries_from_data(scenario_id, mc_run_idx, plot_data_dict, output_dir):
     """
-    Plots true vs. estimated r_t for a single specified MC run of one scenario.
-    This plot now focuses on comparing the sCFR model against the true values and benchmarks.
+    Generates and saves a time-series plot for a single specified MC run
+    based on a dictionary of pre-loaded or pre-calculated data.
 
     Args:
         scenario_id (str): The ID of the scenario (e.g., "S01").
         mc_run_idx (int): The index of the Monte Carlo run being plotted.
-        plot_data_dict (dict): A dictionary containing all necessary time-series data for the plot.
+        plot_data_dict (dict): A dictionary containing all necessary time-series data.
         output_dir (str): The directory where the output PDF will be saved.
     """
     T_analyze = len(plot_data_dict["true_r_t"])
@@ -33,28 +33,34 @@ def plot_cfr_timeseries_from_data(scenario_id, mc_run_idx, plot_data_dict, outpu
 
     fig, ax = plt.subplots(figsize=(12, 7))
 
-    # Plot all curves with labels to be used in the legend
+    # Get data dictionaries for cleaner plotting code
     est_dict = plot_data_dict.get("estimated_r_t_dict", {})
-    sCFR_O_est = est_dict.get("sCFR", {})
+    sCFR_est = est_dict.get("sCFR", {})
     cCFR_est = est_dict.get("cCFR_cumulative", {})
     aCFR_est = est_dict.get("aCFR_cumulative", {})
     its_est = est_dict.get("ITS_MLE", {})
 
+    # Plot ground truth
     ax.plot(time_points, plot_data_dict["true_r_t"], label="True Factual", color='black', linestyle='--')
     ax.plot(time_points, plot_data_dict["true_rcf_0_t"], label="True Counterfactual", color='dimgray', linestyle=':')
     
-    ax.plot(time_points, sCFR_O_est.get("mean", []), label="sCFR-O_F", color='blue')
-    ax.fill_between(time_points, sCFR_O_est.get("lower", []), sCFR_O_est.get("upper", []), color='blue', alpha=0.2, label="sCFR-O_F 95% CrI")
-    
+    # Plot sCFR model estimates
+    ax.plot(time_points, sCFR_est.get("mean", []), label="sCFR Factual", color='blue')
+    ax.fill_between(time_points, sCFR_est.get("lower", []), sCFR_est.get("upper", []), color='blue', alpha=0.2, label="sCFR 95% CrI")
+    ax.plot(time_points, sCFR_est.get("cf_mean", []), label="sCFR Counterfactual", color='deepskyblue', linestyle='-.')
+    ax.fill_between(time_points, sCFR_est.get("cf_lower", []), sCFR_est.get("cf_upper", []), color='deepskyblue', alpha=0.15)
+
+    # Plot benchmark estimates
     ax.plot(time_points, cCFR_est.get("mean", []), label="cCFR", color='red', linestyle=':')
-    ax.fill_between(time_points, cCFR_est.get("lower", []), cCFR_est.get("upper", []), color='red', alpha=0.15, label="cCFR 95% CrI")
-
-    ax.plot(time_points, aCFR_est.get("mean", []), label="aCFR", color='green', linestyle='-.' )
-    ax.fill_between(time_points, aCFR_est.get("lower", []), aCFR_est.get("upper", []), color='green', alpha=0.15, label="aCFR 95% CrI")
+    ax.fill_between(time_points, cCFR_est.get("lower", []), cCFR_est.get("upper", []), color='red', alpha=0.15)
     
-    ax.plot(time_points, its_est.get("factual_mean", []), label="ITS", color='purple', linestyle=(0, (3, 1, 1, 1)))
-    ax.fill_between(time_points, its_est.get("factual_lower", []), its_est.get("factual_upper", []), color='purple', alpha=0.15, label="ITS 95% CI")
+    ax.plot(time_points, aCFR_est.get("mean", []), label="aCFR", color='green', linestyle='-.' )
+    ax.fill_between(time_points, aCFR_est.get("lower", []), aCFR_est.get("upper", []), color='green', alpha=0.15)
+    
+    ax.plot(time_points, its_est.get("factual_mean", []), label="ITS Factual", color='purple', linestyle='--')
+    ax.fill_between(time_points, its_est.get("factual_lower", []), its_est.get("factual_upper", []), color='purple', alpha=0.15)
 
+    # Add vertical lines for interventions
     intervention_times = plot_data_dict.get("true_intervention_times_0_abs", [])
     for i, t_int in enumerate(intervention_times):
         if t_int < T_analyze:
@@ -63,14 +69,13 @@ def plot_cfr_timeseries_from_data(scenario_id, mc_run_idx, plot_data_dict, outpu
     
     ax.set_xlabel("Time (days)")
     ax.set_ylabel("Case Fatality Rate ($r_t$)")
-    ax.set_title(f"CFR Estimation: Scenario {scenario_id} (First MC Run)")
+    ax.set_title(f"CFR Estimation: Scenario {scenario_id} (MC Run {mc_run_idx + 1})")
     ax.legend(loc='center left', bbox_to_anchor=(1, 0.5))
-    fig.tight_layout(rect=[0, 0, 0.80, 1])
+    fig.tight_layout(rect=[0, 0, 0.82, 1])
     
-    plot_filename = os.path.join(output_dir, f"cfr_timeseries_scen{scenario_id}_first_run.pdf")
+    plot_filename = os.path.join(output_dir, f"cfr_timeseries_scen{scenario_id}_{mc_run_idx+1}_run.pdf")
     plt.savefig(plot_filename)
     plt.close(fig)
-
 
 def plot_aggregated_scenarios_summary(aggregated_plot_data, output_dir):
     """
@@ -85,12 +90,10 @@ def plot_aggregated_scenarios_summary(aggregated_plot_data, output_dir):
         print("Warning: No aggregated data provided for summary plot.")
         return
 
-    fig, axes = plt.subplots(4, 3, figsize=(18, 22), sharex=True, sharey=False,
-                             gridspec_kw={'hspace': 0.2, 'wspace': 0.05})
+    fig, axes = plt.subplots(4, 3, figsize=(18, 22), sharex=True, sharey=False)
     
     aggregated_plot_data.sort(key=lambda x: x["scenario_id"])
 
-    # Define row and column titles for the grid
     row_titles = ["Constant", "Linear", "Sinusoidal", "Gaussian"]
     col_titles = ["K=0", "K=1", "K=2"]
 
@@ -101,21 +104,21 @@ def plot_aggregated_scenarios_summary(aggregated_plot_data, output_dir):
         
         T_analyze = len(plot_data_dict["true_r_t"])
         time_points = np.arange(T_analyze)
-
-        # Get data dictionaries for cleaner plotting code
+        
         est_dict = plot_data_dict["estimated_r_t_dict"]
         sCFR_est = est_dict.get("sCFR", {})
         cCFR_est = est_dict.get("cCFR_cumulative", {})
         aCFR_est = est_dict.get("aCFR_cumulative", {})
         its_est = est_dict.get("ITS_MLE", {})
 
+        # Plot all curves
         ax.plot(time_points, plot_data_dict["true_r_t"], label="True Factual", color='black', linestyle='--')
         ax.plot(time_points, plot_data_dict["true_rcf_0_t"], label="True Counterfactual", color='dimgray', linestyle=':')
         
-        ax.plot(time_points, sCFR_est.get("mean", []), label="sCFR-O_F", color='blue')
-        ax.fill_between(time_points, sCFR_est.get("lower", []), sCFR_est.get("upper", []), color='blue', alpha=0.2, label="sCFR-O_F 95% CrI")
-        ax.plot(time_points, sCFR_est.get("cf_mean", []), label="sCFR-O_CF", color='deepskyblue', linestyle='-.')
-        ax.fill_between(time_points, sCFR_est.get("cf_lower", []), sCFR_est.get("cf_upper", []), color='deepskyblue', alpha=0.15, label="sCFR-O_CF 95% CrI")
+        ax.plot(time_points, sCFR_est.get("mean", []), label="sCFR_F", color='blue')
+        ax.fill_between(time_points, sCFR_est.get("lower", []), sCFR_est.get("upper", []), color='blue', alpha=0.2, label="sCFR_F 95% CrI")
+        ax.plot(time_points, sCFR_est.get("cf_mean", []), label="sCFR_CF", color='deepskyblue', linestyle='-.')
+        ax.fill_between(time_points, sCFR_est.get("cf_lower", []), sCFR_est.get("cf_upper", []), color='deepskyblue', alpha=0.15, label="sCFR_CF 95% CrI")
         
         ax.plot(time_points, cCFR_est.get("mean", []), label="cCFR", color='red', linestyle=':')
         ax.fill_between(time_points, cCFR_est.get("lower", []), cCFR_est.get("upper", []), color='red', alpha=0.15, label="cCFR 95% CrI")
@@ -127,7 +130,7 @@ def plot_aggregated_scenarios_summary(aggregated_plot_data, output_dir):
         ax.fill_between(time_points, its_est.get("factual_lower", []), its_est.get("factual_upper", []), color='purple', alpha=0.15, label="ITS 95% CI")
         ax.plot(time_points, its_est.get("cf_mean", []), label="ITS_CF", color='magenta', linestyle=':')
         ax.fill_between(time_points, its_est.get("cf_lower", []), its_est.get("cf_upper", []), color='magenta', alpha=0.15, label="ITS_CF 95% CI")
-
+        
         intervention_times = plot_data_dict.get("true_intervention_times_0_abs", [])
         for t_int in intervention_times:
             if t_int < T_analyze:
@@ -185,8 +188,8 @@ def plot_aggregated_scenarios_summary(aggregated_plot_data, output_dir):
     handles, labels = axes[0, 0].get_legend_handles_labels()
     label_to_handle = dict(zip(labels, handles))
     
-    row1_labels = ["True Factual", "sCFR-O_F", "sCFR-O_CF", "cCFR", "aCFR", "ITS_F", "ITS_CF"]
-    row2_labels = ["True Counterfactual", "sCFR-O_F 95% CrI", "sCFR-O_CF 95% CrI", "cCFR 95% CrI", "aCFR 95% CrI", "ITS_F 95% CI", "ITS_CF 95% CI"]
+    row1_labels = ["True Factual", "sCFR_F", "sCFR_CF", "cCFR", "aCFR", "ITS_F", "ITS_CF"]
+    row2_labels = ["True Counterfactual", "sCFR_F 95% CrI", "sCFR_CF 95% CrI", "cCFR 95% CrI", "aCFR 95% CrI", "ITS_F 95% CI", "ITS_CF 95% CI"]
     
     final_labels = row1_labels + row2_labels
     final_handles = [label_to_handle.get(lbl, plt.Rectangle((0,0),1,1, fill=False, edgecolor='none', visible=False)) for lbl in final_labels]
@@ -486,6 +489,11 @@ def plot_all_scenarios_summary(all_first_run_plot_data, output_dir):
             if "lower" in aCFR_est:
                 ax.fill_between(time_points, aCFR_est["lower"], aCFR_est["upper"], color='green', alpha=0.15, label="aCFR 95% CrI (Beta-Binom)")
 
+        intervention_times = plot_data_dict.get("true_intervention_times_0_abs", [])
+        for t_int in intervention_times:
+            if t_int < len(plot_data_dict["true_r_t"]):
+                ax.axvline(x=t_int, color='red', linestyle='--', alpha=0.7)
+
         ax.set_title(f"Scenario {scenario_id}", fontsize=10)
         ax.tick_params(axis='x', rotation=30)
         if i % 3 == 0: # Leftmost column
@@ -523,63 +531,71 @@ def plot_metric_summary_boxplots(results_df, output_dir):
     """ (As previously defined, ensure benchmark names match those in collect_all_metrics) """
     # Metrics for r_t
     rt_metrics = ["mae_rt", "mciw_rt", "mcic_rt"]
-    benchmark_suffixes_for_plot = ["cCFR_cumulative", "aCFR_cumulative"] # Updated to match benchmarks.py
+    rt_models_to_plot = {
+        "sCFR": "_sCFR", 
+        "ITS": "_its",
+        "aCFR": "_aCFR_cumulative",
+        "cCFR": "_cCFR_cumulative"
+    }
     
     for metric in rt_metrics:
         plot_df_list = []
-        for scen_conf in config.SCENARIOS:
-            scen_id = scen_conf["id"]
+        for scen_id in results_df["scenario_id"].unique():
             scen_df = results_df[results_df["scenario_id"] == scen_id]
-            if scen_df.empty: continue
-
-            if f"{metric}_sCFR" in scen_df.columns:
-                plot_df_list.append(pd.DataFrame({
-                    "scenario_id": scen_id, "method": "sCFR", 
-                    "value": scen_df[f"{metric}_sCFR"]}))
-                
-            for bm_suffix in benchmark_suffixes_for_plot:
-                bm_col_name = f"{metric}_{bm_suffix}"
-                if bm_col_name in scen_df.columns:
+            for model_name, model_suffix in rt_models_to_plot.items():
+                col_name = f"{metric}{model_suffix}"
+                if col_name in scen_df.columns:
                     plot_df_list.append(pd.DataFrame({
-                        "scenario_id": scen_id, "method": bm_suffix.replace('_', ' ').replace('rt', '').strip().title(), 
-                        "value": scen_df[bm_col_name]}))
+                        "scenario_id": scen_id, "method": model_name, "value": scen_df[col_name]
+                    }))
         
         if not plot_df_list: continue
-            
         plot_df_rt = pd.concat(plot_df_list)
         plot_df_rt.dropna(subset=['value'], inplace=True)
 
         if not plot_df_rt.empty:
             plt.figure(figsize=(15, 7))
-            sns.boxplot(x="scenario_id", y="value", hue="method", data=plot_df_rt, order=[s["id"] for s in config.SCENARIOS])
-            plt.title(f"Summary: {metric.upper().replace('RT_','')} for $r_t$")
+            sns.boxplot(x="scenario_id", y="value", hue="method", data=plot_df_rt,
+                        order=[s["id"] for s in config.SCENARIOS])
+            plt.title(f"Factual r_t Summary: {metric.upper().replace('RT_','')}")
             plt.ylabel(metric.upper().replace('RT_',''))
             plt.xlabel("Scenario ID")
             plt.xticks(rotation=45, ha='right')
-            plt.legend(title="Method", bbox_to_anchor=(1.05, 1), loc='upper left')
+            plt.legend(title="Method")
             plt.tight_layout()
             plt.savefig(os.path.join(output_dir, f"summary_boxplot_{metric}_rt.pdf"))
             plt.close()
 
+    # --- Counterfactual rcf_t metrics: Compare sCFR and ITS ---
     rcf_metrics = ["mae_rcf", "mciw_rcf", "mcic_rcf"]
+    rcf_models_to_plot = { "sCFR": "_sCFR", "ITS": "_its" }
+
     for metric in rcf_metrics:
-        metric_col = f"{metric}_sCFR"
-        if metric_col not in results_df.columns:
-            continue
-            
-        plot_df_rcf = results_df[["scenario_id", metric_col]].copy()
-        plot_df_rcf.rename(columns={metric_col: "value"}, inplace=True)
+        plot_df_list = []
+        for scen_id in results_df["scenario_id"].unique():
+            scen_df = results_df[results_df["scenario_id"] == scen_id]
+            for model_name, model_suffix in rcf_models_to_plot.items():
+                col_name = f"{metric}{model_suffix}"
+                if col_name in scen_df.columns:
+                    plot_df_list.append(pd.DataFrame({
+                        "scenario_id": scen_id, "method": model_name, "value": scen_df[col_name]
+                    }))
+        
+        if not plot_df_list: continue
+        plot_df_rcf = pd.concat(plot_df_list)
         plot_df_rcf.dropna(subset=['value'], inplace=True)
         
         if not plot_df_rcf.empty:
             plt.figure(figsize=(15, 7))
-            sns.boxplot(x="scenario_id", y="value", data=plot_df_rcf, order=[s["id"] for s in config.SCENARIOS])
-            plt.title(f"Summary: {metric.upper().replace('RCF','_RCF')} for Counterfactual sCFR")
-            plt.ylabel(metric.upper().replace('RCF','_RCF'))
+            sns.boxplot(x="scenario_id", y="value", hue="method", data=plot_df_rcf,
+                        order=[s["id"] for s in config.SCENARIOS])
+            plt.title(f"Counterfactual r_t Summary: {metric.upper().replace('RCF_','')}")
+            plt.ylabel(metric.upper().replace('RCF_',''))
             plt.xlabel("Scenario ID")
             plt.xticks(rotation=45, ha='right')
+            plt.legend(title="Method")
             plt.tight_layout()
-            plt.savefig(os.path.join(output_dir, f"summary_boxplot_{metric}_sCFR.pdf"))
+            plt.savefig(os.path.join(output_dir, f"summary_boxplot_{metric}_rcf.pdf"))
             plt.close()
 
     # Similar logic for param_metrics as before
@@ -609,3 +625,52 @@ def plot_metric_summary_boxplots(results_df, output_dir):
                         plt.tight_layout()
                         plt.savefig(os.path.join(output_dir, f"summary_boxplot_{metric_col}.pdf"))
                         plt.close()
+
+    param_metrics = ["bias", "width", "cover"]
+    max_interventions = max(s["num_interventions_K_true"] for s in config.SCENARIOS)
+    
+    # Define which models to compare for parameters
+    models_to_compare = {"sCFR": "_sCFR", "ITS": "_its"}
+    
+    for k in range(1, max_interventions + 1):
+        # Loop through each parameter type: beta_abs and lambda
+        for param_base in ["beta_abs", "lambda"]:
+            for metric_suffix in param_metrics:
+                plot_df_list = []
+                # Get scenarios that actually have this intervention
+                scen_list_for_plot = [s["id"] for s in config.SCENARIOS if s["num_interventions_K_true"] >= k]
+                
+                for scen_id in scen_list_for_plot:
+                    scen_df = results_df[results_df["scenario_id"] == scen_id]
+                    if scen_df.empty: continue
+                    
+                    # Melt data for both sCFR and ITS
+                    for model_name, model_suffix_df in models_to_compare.items():
+                        # For sCFR, the parameter is beta_abs. For ITS, it's also beta_abs.
+                        param_base_df = "beta_abs" if model_name == "sCFR" and param_base == "beta_abs" else param_base
+                        col_name = f"{metric_suffix}_{param_base_df}_{k}{model_suffix_df}"
+                        
+                        if col_name in scen_df.columns:
+                            plot_df_list.append(pd.DataFrame({
+                                "scenario_id": scen_id, 
+                                "method": model_name, 
+                                "value": scen_df[col_name]
+                            }))
+                
+                if not plot_df_list: continue
+                plot_df_param = pd.concat(plot_df_list)
+                plot_df_param.dropna(subset=['value'], inplace=True)
+
+                if not plot_df_param.empty:
+                    plt.figure(figsize=(12, 6))
+                    sns.boxplot(x="scenario_id", y="value", hue="method", data=plot_df_param, order=scen_list_for_plot)
+                    
+                    param_display_name = f"$\\beta_{{abs,{k}}}$" if param_base == "beta_abs" else f"$\\lambda_{{{k}}}$"
+                    plt.title(f"Parameter Summary: {metric_suffix.capitalize()} for {param_display_name}")
+                    plt.ylabel(metric_suffix.capitalize())
+                    plt.xlabel("Scenario ID")
+                    plt.xticks(rotation=45, ha='right')
+                    plt.legend(title="Method")
+                    plt.tight_layout()
+                    plt.savefig(os.path.join(output_dir, f"summary_boxplot_{metric_suffix}_{param_base}_{k}.pdf"))
+                    plt.close()
