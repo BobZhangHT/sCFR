@@ -8,13 +8,13 @@ import numpy as np
 # ----------------------------------------------------------------------------
 # General Simulation Parameters
 # ----------------------------------------------------------------------------
-NUM_MONTE_CARLO_RUNS = 2
+NUM_MONTE_CARLO_RUNS = 10
 T_ANALYSIS_LENGTH = 200       # << NEW: The period we actually care about evaluating
 T_SIMULATION_BUFFER = 60      # << NEW: Simulate for this many extra days
 T_SERIES_LENGTH_SIM = T_ANALYSIS_LENGTH + T_SIMULATION_BUFFER # << NEW: Total days to simulate
 
 GLOBAL_BASE_SEED = 2025
-NUM_CORES_TO_USE = 2#os.cpu_count() - 1 if os.cpu_count() > 1 else 1
+NUM_CORES_TO_USE = 5#os.cpu_count() - 1 if os.cpu_count() > 1 else 1
 
 PENALTY_GRID_ALPHA = [0.01, 0.1, 1, 10, 100]
 PENALTY_GRID_GAMMA_LAMBDA = [0.01, 0.1, 1, 10, 100]
@@ -22,6 +22,8 @@ N_BOOTSTRAPS_ITS = 200
 
 OVERWRITE_EXISTING_RESULTS = True  # If True, will re-run all simulations regardless of saved files.
                                    # If False, will skip runs with existing metric files.
+
+USE_CONSTRAINT = False # Use constraint in the model
 
 # ----------------------------------------------------------------------------
 # Data Generation Process (DGP) Parameters
@@ -52,10 +54,20 @@ MIN_DRAWN_CASES = 20               # Absolute minimum for a day's case count.
 C_T_INTERVENTION_EFFECT_SCALAR = 0.5
 
 # True Intervention Parameters (magnitudes increased for visual clarity)
-TRUE_BETA_ABS_K1 = [5]
-TRUE_BETA_ABS_K2 = [5, 3]
-TRUE_LAMBDA_K1 = [0.3]
-TRUE_LAMBDA_K2 = [0.3, 0.3]#[0.15, 0.12]
+# TRUE_BETA_ABS_K1 = [1]
+# TRUE_BETA_ABS_K2 = [1, 1]
+# TRUE_LAMBDA_K1 = [0.3]
+# TRUE_LAMBDA_K2 = [0.3, 0.3]#[0.15, 0.12]
+# TRUE_T_K1_FACTOR = [0.5] 
+# TRUE_T_K2_FACTOR = [0.33, 0.66]
+# SIGNS_K1 = [-1]
+# SIGNS_K2 = [-1, 1]
+
+
+TRUE_BETA_ABS_K1 = [1]
+TRUE_BETA_ABS_K2 = [1, 1]
+TRUE_LAMBDA_K1 = [1]
+TRUE_LAMBDA_K2 = [1, 1]
 TRUE_T_K1_FACTOR = [0.5] 
 TRUE_T_K2_FACTOR = [0.33, 0.66]
 SIGNS_K1 = [-1]
@@ -69,9 +81,19 @@ cfr_types_params = {
     "C1": {"name": "Constant", "params": {"cfr_const": 0.02}},
     "C2": {"name": "Linear Decr.", "params": {"cfr_start": 0.03, "cfr_end": 0.01}},
     "C3": {"name": "Sine Wave", "params": {"cfr_mean": 0.02, "amp": 0.01, "freq": 1.0}},
-    "C4": {"name": "Gaussian Kernel", "params": {"cfr_base": 0.01, "peak_h": 0.03, 
-                                               "peak_t_factor": 0.5, "peak_w_factor": 0.1}}
+    "C4": {"name": "Gaussian Kernel", "params": {"cfr_base": 0.01, "peak_h": 0.04, 
+                                               "peak_t_factor": 0.5, "peak_w_factor": 0.2}}
 }
+
+# cfr_types_params = {
+#     # ** FIX: Baselines are slightly increased to make intervention effects more evident **
+#     "C1": {"name": "Constant", "params": {"cfr_const": 0.04}},
+#     "C2": {"name": "Linear Decr.", "params": {"cfr_start": 0.05, "cfr_end": 0.03}},
+#     "C3": {"name": "Sine Wave", "params": {"cfr_mean": 0.04, "amp": 0.02, "freq": 1.0}},
+#     "C4": {"name": "Gaussian Kernel", "params": {"cfr_base": 0.03, "peak_h": 0.03, 
+#                                                "peak_t_factor": 0.5, "peak_w_factor": 0.1}}
+# }
+
 intervention_types_params = {
     "I0": {"name": "K=0", "K": 0, "beta_abs": [], "lambda_": [], "times_factor": [], "signs": []},
     "I1": {"name": "K=1 (β<0)", "K": 1, "beta_abs": TRUE_BETA_ABS_K1, "lambda_": TRUE_LAMBDA_K1, "times_factor": TRUE_T_K1_FACTOR, "signs": SIGNS_K1},

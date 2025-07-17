@@ -8,14 +8,16 @@ import os
 import config
 import evaluation # For get_posterior_estimates from saved summaries if needed
 
-plt.style.use('seaborn-v0_8-whitegrid') 
+plt.style.use('seaborn-v0_8-paper') 
 plt.rcParams.update({
-    'font.family': 'serif', 'font.size': 10,
-    'axes.labelsize': 10, 'axes.titlesize': 12,
-    'xtick.labelsize': 8, 'ytick.labelsize': 8,
-    'legend.fontsize': 8, 'figure.dpi': 150, # Lowered for faster generation if needed
-    'savefig.dpi': 800, 'lines.linewidth': 1.5,
+    'font.family': 'serif', 'font.size': 11, 'axes.labelsize': 12, 'axes.titlesize': 16,
+    'xtick.labelsize': 9, 'ytick.labelsize': 9, 'legend.fontsize': 12, 'figure.dpi': 150,
+    'savefig.dpi': 300, 'lines.linewidth': 1.5,
 })
+MODEL_COLORS = {
+    'True Factual': 'black', 'True Counterfactual': 'dimgray',
+    'sCFR': 'blue', 'cCFR': 'red', 'aCFR': 'green', 'ITS': 'purple'
+}
 
 def plot_cfr_timeseries_from_data(scenario_id, mc_run_idx, plot_data_dict, output_dir):
     """
@@ -77,23 +79,15 @@ def plot_cfr_timeseries_from_data(scenario_id, mc_run_idx, plot_data_dict, outpu
     plt.savefig(plot_filename)
     plt.close(fig)
 
-def plot_aggregated_scenarios_summary(aggregated_plot_data, output_dir):
-    """
-    Generates a summarized 4x3 grid plot showing the average performance across all MC runs.
-    This version includes all requested enhancements to layout, legend, and y-axis scaling.
 
-    Args:
-        aggregated_plot_data (list): A list of dictionaries containing average curves and CIs.
-        output_dir (str): The directory to save the plot.
+def plot_aggregated_factual_summary(aggregated_plot_data, output_dir):
     """
-    if not aggregated_plot_data:
-        print("Warning: No aggregated data provided for summary plot.")
-        return
-
-    fig, axes = plt.subplots(4, 3, figsize=(18, 22), sharex=True, sharey=False)
+    Generates a summarized 4x3 grid plot for FACTUAL estimates.
+    """
+    if not aggregated_plot_data: return
+    fig, axes = plt.subplots(4, 3, figsize=(18, 20), sharex=True, sharey=False)
     
     aggregated_plot_data.sort(key=lambda x: x["scenario_id"])
-
     row_titles = ["Constant", "Linear", "Sinusoidal", "Gaussian"]
     col_titles = ["K=0", "K=1", "K=2"]
 
@@ -101,84 +95,41 @@ def plot_aggregated_scenarios_summary(aggregated_plot_data, output_dir):
         if i >= 12: break
         row_idx, col_idx = i // 3, i % 3
         ax = axes[row_idx, col_idx]
-        
         T_analyze = len(plot_data_dict["true_r_t"])
         time_points = np.arange(T_analyze)
-        
+
         est_dict = plot_data_dict["estimated_r_t_dict"]
-        sCFR_est = est_dict.get("sCFR", {})
+        sCFR_est = est_dict.get("sCFR", {}) 
         cCFR_est = est_dict.get("cCFR_cumulative", {})
         aCFR_est = est_dict.get("aCFR_cumulative", {})
         its_est = est_dict.get("ITS_MLE", {})
 
-        # Plot all curves
-        ax.plot(time_points, plot_data_dict["true_r_t"], label="True Factual", color='black', linestyle='--')
-        ax.plot(time_points, plot_data_dict["true_rcf_0_t"], label="True Counterfactual", color='dimgray', linestyle=':')
+        ax.plot(time_points, plot_data_dict["true_r_t"], label="True Factual", color=MODEL_COLORS['True Factual'], linestyle='--')
         
-        ax.plot(time_points, sCFR_est.get("mean", []), label="sCFR_F", color='blue')
-        ax.fill_between(time_points, sCFR_est.get("lower", []), sCFR_est.get("upper", []), color='blue', alpha=0.2, label="sCFR_F 95% CrI")
-        ax.plot(time_points, sCFR_est.get("cf_mean", []), label="sCFR_CF", color='deepskyblue', linestyle='-.')
-        ax.fill_between(time_points, sCFR_est.get("cf_lower", []), sCFR_est.get("cf_upper", []), color='deepskyblue', alpha=0.15, label="sCFR_CF 95% CrI")
+        ax.plot(time_points, sCFR_est.get("mean", []), label="sCFR", color=MODEL_COLORS['sCFR'])
+        ax.fill_between(time_points, sCFR_est.get("lower", []), sCFR_est.get("upper", []), color=MODEL_COLORS['sCFR'], alpha=0.2)
         
-        ax.plot(time_points, cCFR_est.get("mean", []), label="cCFR", color='red', linestyle=':')
-        ax.fill_between(time_points, cCFR_est.get("lower", []), cCFR_est.get("upper", []), color='red', alpha=0.15, label="cCFR 95% CrI")
+        ax.plot(time_points, cCFR_est.get("mean", []), label="cCFR", color=MODEL_COLORS['cCFR'], linestyle=':')
+        ax.fill_between(time_points, cCFR_est.get("lower", []), cCFR_est.get("upper", []), color=MODEL_COLORS['cCFR'], alpha=0.15)
         
-        ax.plot(time_points, aCFR_est.get("mean", []), label="aCFR", color='green', linestyle='-.' )
-        ax.fill_between(time_points, aCFR_est.get("lower", []), aCFR_est.get("upper", []), color='green', alpha=0.15, label="aCFR 95% CrI")
+        ax.plot(time_points, aCFR_est.get("mean", []), label="aCFR", color=MODEL_COLORS['aCFR'], linestyle='-.')
+        ax.fill_between(time_points, aCFR_est.get("lower", []), aCFR_est.get("upper", []), color=MODEL_COLORS['aCFR'], alpha=0.15)
         
-        ax.plot(time_points, its_est.get("factual_mean", []), label="ITS", color='purple', linestyle=(0, (3, 1, 1, 1)))
-        ax.fill_between(time_points, its_est.get("factual_lower", []), its_est.get("factual_upper", []), color='purple', alpha=0.15, label="ITS 95% CI")
-        ax.plot(time_points, its_est.get("cf_mean", []), label="ITS_CF", color='magenta', linestyle=':')
-        ax.fill_between(time_points, its_est.get("cf_lower", []), its_est.get("cf_upper", []), color='magenta', alpha=0.15, label="ITS_CF 95% CI")
-        
+        ax.plot(time_points, its_est.get("factual_mean", []), label="ITS", color=MODEL_COLORS['ITS'], linestyle='--')
+        ax.fill_between(time_points, its_est.get("factual_lower", []), its_est.get("factual_upper", []), color=MODEL_COLORS['ITS'], alpha=0.15)
+
         intervention_times = plot_data_dict.get("true_intervention_times_0_abs", [])
         for t_int in intervention_times:
             if t_int < T_analyze:
                 ax.axvline(x=t_int, color='red', linestyle='--', alpha=0.7)
         
-        ax.grid(True, linestyle=':', alpha=0.6)
-
-        # # Plot all curves with their specific labels for the legend
-        # ax.plot(time_points, plot_data_dict["true_r_t"], label="True Factual", color='black', linestyle='--')
-        # ax.plot(time_points, plot_data_dict["true_rcf_0_t"], label="True Counterfactual", color='dimgray', linestyle=':')
-        # ax.plot(time_points, sCFR_est.get("mean", []), label="sCFR_F", color='blue')
-        # ax.fill_between(time_points, sCFR_est.get("lower", []), sCFR_est.get("upper", []), color='blue', alpha=0.2, label="sCFR_F 95% CrI")
-        # ax.plot(time_points, sCFR_est.get("cf_mean", []), label="sCFR_CF", color='deepskyblue', linestyle='-.')
-        # ax.fill_between(time_points, sCFR_est.get("cf_lower", []), sCFR_est.get("cf_upper", []), color='deepskyblue', alpha=0.15, label="sCFR_CF 95% CrI")
-        
-        # ax.plot(time_points, cCFR_est.get("mean", []), label="cCFR", color='red', linestyle=':')
-        # ax.fill_between(time_points, cCFR_est.get("lower", []), cCFR_est.get("upper", []), color='red', alpha=0.15, label="cCFR 95% CrI")
-        
-        # ax.plot(time_points, aCFR_est.get("mean", []), label="aCFR", color='green', linestyle='-.' )
-        # ax.fill_between(time_points, aCFR_est.get("lower", []), aCFR_est.get("upper", []), color='green', alpha=0.15, label="aCFR 95% CrI")
-        
-        # # ax.plot(time_points, its_est.get("factual_mean", []), label="ITS", color='purple', linestyle=(0, (3, 1, 1, 1))) # dashdotdot
-        # # ax.fill_between(time_points, its_est.get("factual_lower", []), its_est.get("factual_upper", []), color='purple', alpha=0.15, label="ITS 95% CI")
-
-        # # ITS factual estimate and its CI
-        # ax.plot(time_points, its_est.get("factual_mean", []), label="ITS (Factual)", color='purple', linestyle='--')
-        # ax.fill_between(time_points, its_est.get("factual_lower", []), its_est.get("factual_upper", []), color='purple', alpha=0.15, label="ITS 95% CI (Factual)")
-        
-        # # ITS counterfactual estimate and its CI
-        # ax.plot(time_points, its_est.get("cf_mean", []), label="ITS (Counterfactual)", color='magenta', linestyle=':')
-        # ax.fill_between(time_points, its_est.get("cf_lower", []), its_est.get("cf_upper", []), color='magenta', alpha=0.15, label="ITS 95% CI (CF)")
-        
-        # ax.grid(True, linestyle=':', alpha=0.6)
-
-        # Dynamic Y-axis zooming
         plotted_vals = np.concatenate([
-            plot_data_dict["true_r_t"], sCFR_est.get("upper", []), aCFR_est.get("upper", []), its_est.get("factual_upper", [])
+            plot_data_dict["true_r_t"], sCFR_est.get("upper", []), 
+            its_est.get("factual_upper", [])
         ])
         min_val, max_val = np.nanmin(plotted_vals), np.nanmax(plotted_vals)
         y_padding = (max_val - min_val) * 0.10 if (max_val - min_val) > 0 else 0.01
         ax.set_ylim(0, min(0.3, max_val + y_padding))
-        
-        # plotted_vals = np.concatenate([
-        #     plot_data_dict["true_r_t"], sCFR_est.get("upper", []), aCFR_est.get("upper", [])
-        # ])
-        # min_val, max_val = np.nanmin(plotted_vals), np.nanmax(plotted_vals)
-        # y_padding = (max_val - min_val) * 0.10 if (max_val - min_val) > 0 else 0.01
-        # ax.set_ylim(0, max_val + y_padding)
 
     # --- Set row and column titles ---
     for i, title in enumerate(row_titles): axes[i, 0].set_ylabel(title, fontsize=16, labelpad=15)
@@ -186,62 +137,238 @@ def plot_aggregated_scenarios_summary(aggregated_plot_data, output_dir):
 
     # --- Generate the custom legend ---
     handles, labels = axes[0, 0].get_legend_handles_labels()
-    label_to_handle = dict(zip(labels, handles))
     
-    row1_labels = ["True Factual", "sCFR_F", "sCFR_CF", "cCFR", "aCFR", "ITS_F", "ITS_CF"]
-    row2_labels = ["True Counterfactual", "sCFR_F 95% CrI", "sCFR_CF 95% CrI", "cCFR 95% CrI", "aCFR 95% CrI", "ITS_F 95% CI", "ITS_CF 95% CI"]
+    # fig.supylabel("Baseline CFR Pattern", x=0.03, y=0.5, fontsize=18)
+    # fig.supxlabel("Number of Interventions", x=0.5, y=0.97, fontsize=18)
     
-    final_labels = row1_labels + row2_labels
-    final_handles = [label_to_handle.get(lbl, plt.Rectangle((0,0),1,1, fill=False, edgecolor='none', visible=False)) for lbl in final_labels]
-
-    fig.legend(final_handles, final_labels, loc='lower center', ncol=len(row1_labels), bbox_to_anchor=(0.5, 0.03), fontsize=12, frameon=True)
-    
-    fig.supylabel("Baseline CFR Pattern", x=0.03, y=0.5, fontsize=18)
-    fig.supxlabel("Number of Interventions", x=0.5, y=0.97, fontsize=18)
-    fig.suptitle("Aggregated CFR Estimation Across All Scenarios", fontsize=24, y=1.0)
-    
-    fig.subplots_adjust(left=0.08, right=0.98, bottom=0.12, top=0.92, hspace=0.25, wspace=0.05)
-    
-    plot_filename = os.path.join(output_dir, "all_scenarios_aggregated_summary.pdf")
-    plt.savefig(plot_filename)
+    fig.legend(handles, labels, loc='lower center', ncol=5, bbox_to_anchor=(0.5, 0.03))
+    fig.suptitle("Aggregated Factual CFR Estimation Across All Scenarios", fontsize=24, y=0.98)
+    plt.tight_layout(rect=[0.05, 0.07, 1, 0.95])
+    plt.savefig(os.path.join(output_dir, "aggregate_summary_plot_F.pdf"))
     plt.close(fig)
 
-    # # --- Set row and column titles ---
-    # for i, title in enumerate(row_titles):
-    #     axes[i, 0].set_ylabel(title, fontsize=16, labelpad=15)
-    # for j, title in enumerate(col_titles):
-    #     axes[0, j].set_title(title, fontsize=18, pad=10)
+def plot_aggregated_counterfactual_summary(aggregated_plot_data, output_dir):
+    """
+    Generates a summarized 4x3 grid plot for COUNTERFACTUAL estimates.
+    """
+    if not aggregated_plot_data: return
+    fig, axes = plt.subplots(4, 3, figsize=(18, 20), sharex=True, sharey=False)
 
-    # # --- FIX: Generate the custom two-row legend with correct order ---
-    # handles, labels = axes[0, 0].get_legend_handles_labels()
-    # label_to_handle = dict(zip(labels, handles))
-    
-    # row1_labels = ["True Factual", "sCFR_F", "sCFR_CF", "cCFR", "aCFR"]
-    # row2_labels = ["True Counterfactual", "sCFR_F 95% CrI", "sCFR_CF 95% CrI", "cCFR 95% CrI", "aCFR 95% CrI"]
-    
-    # # Add ITS to the legend if it was plotted
-    # if "ITS" in " ".join(label_to_handle.keys()):
-    #     row1_labels.append("ITS")
-    #     row2_labels.append("ITS 95% CI")
-    
-    # final_labels = row1_labels + row2_labels
-    # final_handles = [label_to_handle.get(lbl, plt.Rectangle((0,0),1,1, fill=False, edgecolor='none', visible=False)) for lbl in final_labels]
+    aggregated_plot_data.sort(key=lambda x: x["scenario_id"])
+    row_titles = ["Constant", "Linear", "Sinusoidal", "Gaussian"]
+    col_titles = ["K=0", "K=1", "K=2"]
 
-    # # Create the legend at the bottom with the appropriate number of columns
-    # ncol = len(row1_labels)
-    # fig.legend(final_handles, final_labels, loc='lower center', ncol=ncol, bbox_to_anchor=(0.5, 0.03), fontsize=14, frameon=True, framealpha=0.95)
-    
-    # # --- FIX: Use super-titles and manual spacing for a clean layout ---
+    for i, plot_data_dict in enumerate(aggregated_plot_data):
+        if i >= 12: break
+        row_idx, col_idx = i // 3, i % 3
+        ax = axes[row_idx, col_idx]
+        T_analyze = len(plot_data_dict["true_rcf_0_t"])
+        time_points = np.arange(T_analyze)
+
+        est_dict = plot_data_dict["estimated_r_t_dict"]
+        sCFR_est = est_dict.get("sCFR", {}) 
+        its_est = est_dict.get("ITS_MLE", {})
+
+        ax.plot(time_points, plot_data_dict["true_rcf_0_t"], label="True Counterfactual", color=MODEL_COLORS['True Counterfactual'], linestyle=':')
+        
+        ax.plot(time_points, sCFR_est.get("cf_mean", []), label="sCFR", color=MODEL_COLORS['sCFR'])
+        ax.fill_between(time_points, sCFR_est.get("cf_lower", []), sCFR_est.get("cf_upper", []), color=MODEL_COLORS['sCFR'], alpha=0.2)
+        
+        ax.plot(time_points, its_est.get("cf_mean", []), label="ITS", color=MODEL_COLORS['ITS'], linestyle='--')
+        ax.fill_between(time_points, its_est.get("cf_lower", []), its_est.get("cf_upper", []), color=MODEL_COLORS['ITS'], alpha=0.15)
+
+        intervention_times = plot_data_dict.get("true_intervention_times_0_abs", [])
+        for t_int in intervention_times:
+            if t_int < T_analyze:
+                ax.axvline(x=t_int, color='red', linestyle='--', alpha=0.7)
+        
+        plotted_vals = np.concatenate([
+            plot_data_dict["true_rcf_0_t"], sCFR_est.get("cf_upper", []), its_est.get("cf_upper", [])
+        ])
+        min_val, max_val = np.nanmin(plotted_vals), np.nanmax(plotted_vals)
+        y_padding = (max_val - min_val) * 0.10 if (max_val - min_val) > 0 else 0.01
+        ax.set_ylim(0, min(0.3, max_val + y_padding))
+
+    # --- Set row and column titles ---
+    for i, title in enumerate(row_titles): axes[i, 0].set_ylabel(title, fontsize=16, labelpad=15)
+    for j, title in enumerate(col_titles): axes[0, j].set_title(title, fontsize=18, pad=10)
+
     # fig.supylabel("Baseline CFR Pattern", x=0.03, y=0.5, fontsize=18)
-    # fig.suptitle("Aggregated CFR Estimation Across All 12 Scenarios", fontsize=24, y=0.99)
-    # fig.text(0.5, 0.95, "Number of Interventions", ha='center', va='center', fontsize=18)
+    # fig.supxlabel("Number of Interventions", x=0.5, y=0.97, fontsize=18)
 
-    # # Use subplots_adjust to manually set spacing and prevent warnings
-    # fig.subplots_adjust(left=0.08, right=0.98, bottom=0.12, top=0.91, hspace=0.25, wspace=0.05)
+    handles, labels = axes[0, 0].get_legend_handles_labels()
+    fig.legend(handles, labels, loc='lower center', ncol=3, bbox_to_anchor=(0.5, 0.03))
+    fig.suptitle("Aggregated Counterfactual CFR Estimation Across All Scenarios", fontsize=24, y=0.98)
+    plt.tight_layout(rect=[0.05, 0.07, 1, 0.95])
+    plt.savefig(os.path.join(output_dir, "aggregate_summary_plot_CF.pdf"))
+    plt.close(fig)
+
     
-    # plot_filename = os.path.join(output_dir, "all_scenarios_aggregated_summary.pdf")
-    # plt.savefig(plot_filename)
-    # plt.close(fig)
+# def plot_aggregated_scenarios_summary(aggregated_plot_data, output_dir):
+#     """
+#     Generates a summarized 4x3 grid plot showing the average performance across all MC runs.
+#     This version includes all requested enhancements to layout, legend, and y-axis scaling.
+
+#     Args:
+#         aggregated_plot_data (list): A list of dictionaries containing average curves and CIs.
+#         output_dir (str): The directory to save the plot.
+#     """
+#     if not aggregated_plot_data:
+#         print("Warning: No aggregated data provided for summary plot.")
+#         return
+
+#     fig, axes = plt.subplots(4, 3, figsize=(18, 22), sharex=True, sharey=False)
+    
+#     aggregated_plot_data.sort(key=lambda x: x["scenario_id"])
+
+#     row_titles = ["Constant", "Linear", "Sinusoidal", "Gaussian"]
+#     col_titles = ["K=0", "K=1", "K=2"]
+
+#     for i, plot_data_dict in enumerate(aggregated_plot_data):
+#         if i >= 12: break
+#         row_idx, col_idx = i // 3, i % 3
+#         ax = axes[row_idx, col_idx]
+        
+#         T_analyze = len(plot_data_dict["true_r_t"])
+#         time_points = np.arange(T_analyze)
+        
+#         est_dict = plot_data_dict["estimated_r_t_dict"]
+#         sCFR_est = est_dict.get("sCFR", {})
+#         cCFR_est = est_dict.get("cCFR_cumulative", {})
+#         aCFR_est = est_dict.get("aCFR_cumulative", {})
+#         its_est = est_dict.get("ITS_MLE", {})
+
+#         # Plot all curves
+#         ax.plot(time_points, plot_data_dict["true_r_t"], label="True Factual", color='black', linestyle='--')
+#         ax.plot(time_points, plot_data_dict["true_rcf_0_t"], label="True Counterfactual", color='dimgray', linestyle=':')
+        
+#         ax.plot(time_points, sCFR_est.get("mean", []), label="sCFR_F", color='blue')
+#         ax.fill_between(time_points, sCFR_est.get("lower", []), sCFR_est.get("upper", []), color='blue', alpha=0.2, label="sCFR_F 95% CrI")
+#         ax.plot(time_points, sCFR_est.get("cf_mean", []), label="sCFR_CF", color='deepskyblue', linestyle='-.')
+#         ax.fill_between(time_points, sCFR_est.get("cf_lower", []), sCFR_est.get("cf_upper", []), color='deepskyblue', alpha=0.15, label="sCFR_CF 95% CrI")
+        
+#         ax.plot(time_points, cCFR_est.get("mean", []), label="cCFR", color='red', linestyle=':')
+#         ax.fill_between(time_points, cCFR_est.get("lower", []), cCFR_est.get("upper", []), color='red', alpha=0.15, label="cCFR 95% CrI")
+        
+#         ax.plot(time_points, aCFR_est.get("mean", []), label="aCFR", color='green', linestyle='-.' )
+#         ax.fill_between(time_points, aCFR_est.get("lower", []), aCFR_est.get("upper", []), color='green', alpha=0.15, label="aCFR 95% CrI")
+        
+#         ax.plot(time_points, its_est.get("factual_mean", []), label="ITS", color='purple', linestyle=(0, (3, 1, 1, 1)))
+#         ax.fill_between(time_points, its_est.get("factual_lower", []), its_est.get("factual_upper", []), color='purple', alpha=0.15, label="ITS 95% CI")
+#         ax.plot(time_points, its_est.get("cf_mean", []), label="ITS_CF", color='magenta', linestyle=':')
+#         ax.fill_between(time_points, its_est.get("cf_lower", []), its_est.get("cf_upper", []), color='magenta', alpha=0.15, label="ITS_CF 95% CI")
+        
+#         intervention_times = plot_data_dict.get("true_intervention_times_0_abs", [])
+#         for t_int in intervention_times:
+#             if t_int < T_analyze:
+#                 ax.axvline(x=t_int, color='red', linestyle='--', alpha=0.7)
+    
+#         ax.grid(True, linestyle=':', alpha=0.6)
+
+#         # # Plot all curves with their specific labels for the legend
+#         # ax.plot(time_points, plot_data_dict["true_r_t"], label="True Factual", color='black', linestyle='--')
+#         # ax.plot(time_points, plot_data_dict["true_rcf_0_t"], label="True Counterfactual", color='dimgray', linestyle=':')
+#         # ax.plot(time_points, sCFR_est.get("mean", []), label="sCFR_F", color='blue')
+#         # ax.fill_between(time_points, sCFR_est.get("lower", []), sCFR_est.get("upper", []), color='blue', alpha=0.2, label="sCFR_F 95% CrI")
+#         # ax.plot(time_points, sCFR_est.get("cf_mean", []), label="sCFR_CF", color='deepskyblue', linestyle='-.')
+#         # ax.fill_between(time_points, sCFR_est.get("cf_lower", []), sCFR_est.get("cf_upper", []), color='deepskyblue', alpha=0.15, label="sCFR_CF 95% CrI")
+        
+#         # ax.plot(time_points, cCFR_est.get("mean", []), label="cCFR", color='red', linestyle=':')
+#         # ax.fill_between(time_points, cCFR_est.get("lower", []), cCFR_est.get("upper", []), color='red', alpha=0.15, label="cCFR 95% CrI")
+        
+#         # ax.plot(time_points, aCFR_est.get("mean", []), label="aCFR", color='green', linestyle='-.' )
+#         # ax.fill_between(time_points, aCFR_est.get("lower", []), aCFR_est.get("upper", []), color='green', alpha=0.15, label="aCFR 95% CrI")
+        
+#         # # ax.plot(time_points, its_est.get("factual_mean", []), label="ITS", color='purple', linestyle=(0, (3, 1, 1, 1))) # dashdotdot
+#         # # ax.fill_between(time_points, its_est.get("factual_lower", []), its_est.get("factual_upper", []), color='purple', alpha=0.15, label="ITS 95% CI")
+
+#         # # ITS factual estimate and its CI
+#         # ax.plot(time_points, its_est.get("factual_mean", []), label="ITS (Factual)", color='purple', linestyle='--')
+#         # ax.fill_between(time_points, its_est.get("factual_lower", []), its_est.get("factual_upper", []), color='purple', alpha=0.15, label="ITS 95% CI (Factual)")
+        
+#         # # ITS counterfactual estimate and its CI
+#         # ax.plot(time_points, its_est.get("cf_mean", []), label="ITS (Counterfactual)", color='magenta', linestyle=':')
+#         # ax.fill_between(time_points, its_est.get("cf_lower", []), its_est.get("cf_upper", []), color='magenta', alpha=0.15, label="ITS 95% CI (CF)")
+        
+#         # ax.grid(True, linestyle=':', alpha=0.6)
+
+#         # Dynamic Y-axis zooming
+#         plotted_vals = np.concatenate([
+#             plot_data_dict["true_r_t"], sCFR_est.get("upper", []), aCFR_est.get("upper", []), its_est.get("factual_upper", [])
+#         ])
+#         min_val, max_val = np.nanmin(plotted_vals), np.nanmax(plotted_vals)
+#         y_padding = (max_val - min_val) * 0.10 if (max_val - min_val) > 0 else 0.01
+#         ax.set_ylim(0, min(0.3, max_val + y_padding))
+        
+#         # plotted_vals = np.concatenate([
+#         #     plot_data_dict["true_r_t"], sCFR_est.get("upper", []), aCFR_est.get("upper", [])
+#         # ])
+#         # min_val, max_val = np.nanmin(plotted_vals), np.nanmax(plotted_vals)
+#         # y_padding = (max_val - min_val) * 0.10 if (max_val - min_val) > 0 else 0.01
+#         # ax.set_ylim(0, max_val + y_padding)
+
+#     # --- Set row and column titles ---
+#     for i, title in enumerate(row_titles): axes[i, 0].set_ylabel(title, fontsize=16, labelpad=15)
+#     for j, title in enumerate(col_titles): axes[0, j].set_title(title, fontsize=18, pad=10)
+
+#     # --- Generate the custom legend ---
+#     handles, labels = axes[0, 0].get_legend_handles_labels()
+#     label_to_handle = dict(zip(labels, handles))
+    
+#     row1_labels = ["True Factual", "sCFR_F", "sCFR_CF", "cCFR", "aCFR", "ITS_F", "ITS_CF"]
+#     row2_labels = ["True Counterfactual", "sCFR_F 95% CrI", "sCFR_CF 95% CrI", "cCFR 95% CrI", "aCFR 95% CrI", "ITS_F 95% CI", "ITS_CF 95% CI"]
+    
+#     final_labels = row1_labels + row2_labels
+#     final_handles = [label_to_handle.get(lbl, plt.Rectangle((0,0),1,1, fill=False, edgecolor='none', visible=False)) for lbl in final_labels]
+
+#     fig.legend(final_handles, final_labels, loc='lower center', ncol=len(row1_labels), bbox_to_anchor=(0.5, 0.03), fontsize=12, frameon=True)
+    
+#     fig.supylabel("Baseline CFR Pattern", x=0.03, y=0.5, fontsize=18)
+#     fig.supxlabel("Number of Interventions", x=0.5, y=0.97, fontsize=18)
+#     fig.suptitle("Aggregated CFR Estimation Across All Scenarios", fontsize=24, y=1.0)
+    
+#     fig.subplots_adjust(left=0.08, right=0.98, bottom=0.12, top=0.92, hspace=0.25, wspace=0.05)
+    
+#     plot_filename = os.path.join(output_dir, "all_scenarios_aggregated_summary.pdf")
+#     plt.savefig(plot_filename)
+#     plt.close(fig)
+
+#     # # --- Set row and column titles ---
+#     # for i, title in enumerate(row_titles):
+#     #     axes[i, 0].set_ylabel(title, fontsize=16, labelpad=15)
+#     # for j, title in enumerate(col_titles):
+#     #     axes[0, j].set_title(title, fontsize=18, pad=10)
+
+#     # # --- FIX: Generate the custom two-row legend with correct order ---
+#     # handles, labels = axes[0, 0].get_legend_handles_labels()
+#     # label_to_handle = dict(zip(labels, handles))
+    
+#     # row1_labels = ["True Factual", "sCFR_F", "sCFR_CF", "cCFR", "aCFR"]
+#     # row2_labels = ["True Counterfactual", "sCFR_F 95% CrI", "sCFR_CF 95% CrI", "cCFR 95% CrI", "aCFR 95% CrI"]
+    
+#     # # Add ITS to the legend if it was plotted
+#     # if "ITS" in " ".join(label_to_handle.keys()):
+#     #     row1_labels.append("ITS")
+#     #     row2_labels.append("ITS 95% CI")
+    
+#     # final_labels = row1_labels + row2_labels
+#     # final_handles = [label_to_handle.get(lbl, plt.Rectangle((0,0),1,1, fill=False, edgecolor='none', visible=False)) for lbl in final_labels]
+
+#     # # Create the legend at the bottom with the appropriate number of columns
+#     # ncol = len(row1_labels)
+#     # fig.legend(final_handles, final_labels, loc='lower center', ncol=ncol, bbox_to_anchor=(0.5, 0.03), fontsize=14, frameon=True, framealpha=0.95)
+    
+#     # # --- FIX: Use super-titles and manual spacing for a clean layout ---
+#     # fig.supylabel("Baseline CFR Pattern", x=0.03, y=0.5, fontsize=18)
+#     # fig.suptitle("Aggregated CFR Estimation Across All 12 Scenarios", fontsize=24, y=0.99)
+#     # fig.text(0.5, 0.95, "Number of Interventions", ha='center', va='center', fontsize=18)
+
+#     # # Use subplots_adjust to manually set spacing and prevent warnings
+#     # fig.subplots_adjust(left=0.08, right=0.98, bottom=0.12, top=0.91, hspace=0.25, wspace=0.05)
+    
+#     # plot_filename = os.path.join(output_dir, "all_scenarios_aggregated_summary.pdf")
+#     # plt.savefig(plot_filename)
+#     # plt.close(fig)
 
 # def plot_aggregated_scenarios_summary(aggregated_plot_data, output_dir):
 #     """

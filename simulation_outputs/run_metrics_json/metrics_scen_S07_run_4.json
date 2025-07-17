@@ -1,0 +1,23 @@
+{
+    "scenario_id": "S07",
+    "mc_run": 4,
+    "error": "None",
+    "mae_rt_sCFR": 0.0003815183008555323,
+    "mciw_rt_sCFR": 0.0017926193836610765,
+    "mcic_rt_sCFR": 1.0,
+    "mae_rcf_sCFR": 0.0003815183008555323,
+    "mciw_rcf_sCFR": 0.0017926193836610765,
+    "mcic_rcf_sCFR": 1.0,
+    "mae_rt_cCFR_cumulative": 0.010021998518704396,
+    "mciw_rt_cCFR_cumulative": 0.0007312008412324794,
+    "mcic_rt_cCFR_cumulative": 0.01,
+    "mae_rt_aCFR_cumulative": 0.007130513620255705,
+    "mciw_rt_aCFR_cumulative": 0.0023752922165848995,
+    "mcic_rt_aCFR_cumulative": 0.07,
+    "mae_rt_its": 0.0004108041916130407,
+    "mciw_rt_its": 0.00152535450042664,
+    "mcic_rt_its": 0.86,
+    "mae_rcf_its": 0.0004108041916130407,
+    "mciw_rcf_its": 0.00152535450042664,
+    "mcic_rcf_its": 0.86
+}

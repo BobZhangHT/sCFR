@@ -11,7 +11,7 @@ import pandas as pd
 from sampler import model as numpyro_model, sample as run_numpyro_sampler 
 import config
 
-def get_ols_initial_values(Bm_obs, Z_input_obs, dt_obs, ct_obs, K_spline_obs, num_interventions_K):
+def get_ols_initial_values(Bm_obs, Z_input_obs, dt_obs, ct_obs, K_spline_obs, num_interventions_K, use_constraint):
     """
     Calculates initial values for the MCMC sampler using a single OLS regression.
     This version provides an initial value directly for `beta_abs`.
@@ -32,33 +32,40 @@ def get_ols_initial_values(Bm_obs, Z_input_obs, dt_obs, ct_obs, K_spline_obs, nu
              if pd.isna(median_valid_logit): median_valid_logit = logit(0.01)
              logit_cCFR_target = np.nan_to_num(logit_cCFR_target, nan=median_valid_logit)
 
-    combined_basis = Bm_obs
+    # --- Initialize based on constraint flag ---
+    if use_constraint:
+        # For the constrained model, we need to create the contrast matrix
+        # This part should ideally use a shared helper function with data_generation
+        C_contrast = np.vstack([np.eye(K_spline_obs - 1), -np.ones((1, K_spline_obs - 1))])
+        Bm_con = Bm_obs @ C_contrast
+        combined_basis = Bm_con
+    else:
+        combined_basis = Bm_obs
+
     if num_interventions_K > 0 and Z_input_obs.shape[1] > 0:
-        combined_basis = np.concatenate([Bm_obs, Z_input_obs], axis=1)
-    
+        combined_basis = np.concatenate([combined_basis, Z_input_obs], axis=1)
+        
     try:
         ols = LinearRegression(fit_intercept=False).fit(combined_basis, logit_cCFR_target)
-        alpha_beta_init = ols.coef_
+        all_coefs_init = ols.coef_
     except Exception: 
-        alpha_beta_init = np.zeros(combined_basis.shape[1])
+        all_coefs_init = np.zeros(combined_basis.shape[1])
 
-    alpha_init = alpha_beta_init[:K_spline_obs]
-    
-    # --- Assemble the final initial values dictionary ---
-    data_init = {
-        "alpha": alpha_init,
-        "lambda_alpha": 1.0,
-        "phi": 0.1
-    }
-    
+    data_init = {"lambda_alpha": 1.0, "phi": 0.1}
+
+    if use_constraint:
+        alpha_tilde_init = all_coefs_init[:(K_spline_obs - 1)]
+        data_init["alpha_tilde"] = np.zeros_like(alpha_tilde_init)
+    else:
+        alpha_init = all_coefs_init[:K_spline_obs]
+        data_init["alpha"] = np.zeros_like(alpha_init)
+        
     if num_interventions_K > 0:
-        beta_init_signed = alpha_beta_init[K_spline_obs:]
-        
+        beta_init_signed = all_coefs_init[-num_interventions_K:]
         beta_abs_init = np.maximum(np.abs(beta_init_signed), 1e-3) 
-        
-        data_init["beta_abs"] = beta_abs_init
+        data_init["beta_abs"] = np.ones_like(beta_abs_init)#beta_abs_init
         data_init["lambda"] = np.ones(num_interventions_K) * 0.1
-        
+
     return data_init
 
 def fit_proposed_model(sim_data, jax_prng_key):
@@ -78,7 +85,8 @@ def fit_proposed_model(sim_data, jax_prng_key):
         'fc_mat': sim_data["Q_true"], 
         'Bm': sim_data["Bm_true"], 
         'Z': Z_for_sampler, 
-        'beta_signs': sim_data["beta_signs_true"]
+        'beta_signs': sim_data["beta_signs_true"],
+        'use_constraint': config.USE_CONSTRAINT
     }
     
     data_init = get_ols_initial_values(
@@ -87,7 +95,8 @@ def fit_proposed_model(sim_data, jax_prng_key):
         sim_data["d_t"], 
         sim_data["c_t"],
         sim_data["K_spline_obs"],
-        sim_data["num_interventions_true_K"]
+        sim_data["num_interventions_true_K"],
+        config.USE_CONSTRAINT
     )
             
     posterior_samples, mcmc_obj = run_numpyro_sampler(
