@@ -1,4 +1,5 @@
 /simulation_outputs
-*.npz
+/.ipynb_checkpoints
 *.pdf
 *.ipynb
+*.npz
