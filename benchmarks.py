@@ -1,7 +1,3 @@
-# File: benchmarks.py
-# Description: This version fixes bugs in the ITS benchmark function to correctly
-#              handle scenarios with zero interventions.
-
 import numpy as np
 import pandas as pd
 from scipy.stats import norm, beta as beta_dist
@@ -13,7 +9,17 @@ import itertools
 import config
 
 def construct_Q_matrix(c_t, f_s, T_sim):
-    """Constructs the convolution matrix Q from daily cases and the delay distribution."""
+    """
+    Constructs the convolution matrix Q from daily cases and the delay distribution.
+
+    Args:
+        c_t (numpy.ndarray): Array of daily case counts.
+        f_s (numpy.ndarray): The onset-to-death delay distribution.
+        T_sim (int): The total simulation time length.
+
+    Returns:
+        numpy.ndarray: The convolution matrix Q.
+    """
     N = T_sim
     fs_padded = np.zeros(N)
     len_f_s = len(f_s)
@@ -28,13 +34,24 @@ def construct_Q_matrix(c_t, f_s, T_sim):
     return f_matrix_conv @ np.diag(c_t)
 
 def calculate_crude_cfr(d_t, c_t, window=None, cumulative=False):
-    """Calculates crude CFR (cCFR)."""
+    """
+    Calculates the crude Case Fatality Rate (cCFR).
+
+    Args:
+        d_t (numpy.ndarray): Array of daily death counts.
+        c_t (numpy.ndarray): Array of daily case counts.
+        window (int, optional): The rolling window size. Defaults to None.
+        cumulative (bool, optional): If True, calculates cumulative CFR. Defaults to False.
+
+    Returns:
+        numpy.ndarray: The calculated crude CFR.
+    """
     if cumulative:
         d_t_agg, c_t_agg = np.cumsum(d_t), np.cumsum(c_t)
     elif window:
         d_t_agg = pd.Series(d_t).rolling(window=window, min_periods=1).sum().values
         c_t_agg = pd.Series(c_t).rolling(window=window, min_periods=1).sum().values
-    else: # Daily naive d_t / c_t
+    else:
         d_t_agg, c_t_agg = d_t, c_t
 
     crude_cfr = np.zeros_like(d_t_agg, dtype=float)
@@ -44,7 +61,17 @@ def calculate_crude_cfr(d_t, c_t, window=None, cumulative=False):
     return crude_cfr
 
 def calculate_nishiura_cfr_cumulative(d_t, c_t, f_s):
-    """Calculates Nishiura-style adjusted cumulative CFR (aCFR)."""
+    """
+    Calculates the Nishiura-style adjusted cumulative CFR (aCFR).
+
+    Args:
+        d_t (numpy.ndarray): Array of daily death counts.
+        c_t (numpy.ndarray): Array of daily case counts.
+        f_s (numpy.ndarray): The onset-to-death delay distribution.
+
+    Returns:
+        numpy.ndarray: The adjusted cumulative CFR.
+    """
     T = len(c_t)
     d_t_cumulative = np.cumsum(d_t)
     
@@ -61,11 +88,21 @@ def calculate_nishiura_cfr_cumulative(d_t, c_t, f_s):
     return nishiura_cfr
     
 def calculate_benchmark_cis_with_bayesian(d_t, c_t, f_s, alpha=0.05):
-    """Generates credible intervals for cCFR and aCFR using a cumulative Beta-Binomial model."""
+    """
+    Generates credible intervals for cCFR and aCFR using a cumulative Beta-Binomial model.
+
+    Args:
+        d_t (numpy.ndarray): Array of daily death counts.
+        c_t (numpy.ndarray): Array of daily case counts.
+        f_s (numpy.ndarray): The onset-to-death delay distribution.
+        alpha (float, optional): The significance level for the credible intervals. Defaults to 0.05.
+
+    Returns:
+        dict: A dictionary containing the lower and upper credible intervals for cCFR and aCFR.
+    """
     T = len(c_t)
     alpha_prior, beta_prior = 1e-3, 1e-3
 
-    # --- For cCFR ---
     d_t_cumulative = np.cumsum(d_t)
     c_t_cumulative = np.cumsum(c_t)
     alpha_posterior_cCFR = alpha_prior + d_t_cumulative
@@ -73,7 +110,6 @@ def calculate_benchmark_cis_with_bayesian(d_t, c_t, f_s, alpha=0.05):
     ci_cCFR_lower = beta_dist.ppf(alpha / 2, alpha_posterior_cCFR, beta_posterior_cCFR)
     ci_cCFR_upper = beta_dist.ppf(1 - alpha / 2, alpha_posterior_cCFR, beta_posterior_cCFR)
     
-    # --- For aCFR ---
     fs_padded = np.zeros(T)
     fs_padded[:min(len(f_s), T)] = f_s[:min(len(f_s), T)]
     convolved_cases = np.convolve(c_t, fs_padded, mode='full')[:T]
@@ -92,13 +128,19 @@ def calculate_benchmark_cis_with_bayesian(d_t, c_t, f_s, alpha=0.05):
 
 def calculate_its_with_penalized_mle(d_t, c_t, f_s, Bm, intervention_times_abs, intervention_signs, alpha=0.05):
     """
-    [LATEST BENCHMARK] Estimates parameters and curves using a Penalized Poisson MLE ITS model.
-    This version correctly handles scenarios with K=0 interventions.
-    """
-def calculate_its_with_penalized_mle(d_t, c_t, f_s, Bm, intervention_times_abs, intervention_signs, alpha=0.05):
-    """
-    [LATEST BENCHMARK] Estimates parameters and curves using a Penalized Poisson MLE ITS model.
-    This version uses a fused LASSO penalty on alpha and an L2 penalty on beta_abs.
+    Estimates parameters and curves using a Penalized Poisson MLE Interrupted Time Series (ITS) model.
+
+    Args:
+        d_t (numpy.ndarray): Array of daily death counts.
+        c_t (numpy.ndarray): Array of daily case counts.
+        f_s (numpy.ndarray): The onset-to-death delay distribution.
+        Bm (numpy.ndarray): The B-spline basis matrix.
+        intervention_times_abs (list): A list of absolute intervention times.
+        intervention_signs (list): A list of signs for the intervention effects.
+        alpha (float, optional): The significance level for confidence intervals. Defaults to 0.05.
+
+    Returns:
+        dict: A dictionary of results including estimated curves and parameters.
     """
     T, K_spline = Bm.shape
     K_interventions = len(intervention_times_abs)
@@ -112,7 +154,6 @@ def calculate_its_with_penalized_mle(d_t, c_t, f_s, Bm, intervention_times_abs, 
             Z_its[:, k] = np.maximum(0, t_array - intervention_times_abs[k])
 
     def objective_func(params, Bm, Z, d_t_data, Q, signs, p_alpha, p_beta):
-        """The penalized negative Poisson log-likelihood objective function."""
         alphas = params[:K_spline]
         baseline_trend = Bm @ alphas
         intervention_effect, penalty2 = 0.0, 0.0
@@ -123,22 +164,18 @@ def calculate_its_with_penalized_mle(d_t, c_t, f_s, Bm, intervention_times_abs, 
             
             betas = beta_abs * signs
             intervention_effect = np.sum((1 - np.exp(-lambdas * Z)) * betas, axis=1)
-            
-            # ** L2 penalty on beta_abs **
             penalty2 = p_beta * np.sum(beta_abs**2)
 
         r_t_pred = sigmoid(baseline_trend + intervention_effect)
         mu_pred = np.maximum(Q @ r_t_pred, 1e-9)
         nll = -np.sum(d_t_data * np.log(mu_pred) - mu_pred)
         
-        # ** L1 penalty on second differences of alpha (fused LASSO) **
         penalty1 = p_alpha * np.sum(np.abs(np.diff(alphas, n=2)))
         
         return nll + penalty1 + penalty2
 
-    # --- Step 1: Tune penalty strengths using Grid-Search Time-Series CV ---
     p_alpha_grid = config.PENALTY_GRID_ALPHA
-    p_beta_grid = config.PENALTY_GRID_GAMMA_LAMBDA
+    p_beta_grid = config.PENALTY_GRID_BETA
     tscv = TimeSeriesSplit(n_splits=3)
     cv_scores = {}
 
@@ -163,7 +200,6 @@ def calculate_its_with_penalized_mle(d_t, c_t, f_s, Bm, intervention_times_abs, 
     best_penalties = min(cv_scores, key=cv_scores.get) if cv_scores else (1.0, 1.0)
     best_penalty_alpha, best_penalty_beta = best_penalties
 
-    # --- Step 2: Fit final model on all data with the best penalties ---
     final_result = minimize(
         objective_func, x0=p0, 
         args=(Bm, Z_its, d_t, Q_matrix, intervention_signs, best_penalty_alpha, best_penalty_beta), 
@@ -171,7 +207,6 @@ def calculate_its_with_penalized_mle(d_t, c_t, f_s, Bm, intervention_times_abs, 
     )
     popt = final_result.x if final_result.success else np.full(num_params, np.nan)
 
-    # --- Step 3: Parametric Bootstrap for Confidence Intervals ---
     alphas_hat, beta_abs_hat, lambdas_hat = (popt[:K_spline], 
                                              popt[K_spline:-K_interventions] if K_interventions > 0 else np.array([]), 
                                              popt[-K_interventions:] if K_interventions > 0 else np.array([]))
@@ -199,7 +234,6 @@ def calculate_its_with_penalized_mle(d_t, c_t, f_s, Bm, intervention_times_abs, 
     boot_params = Parallel(n_jobs=-1)(delayed(bootstrap_iteration)(seed) for seed in boot_seeds)
     boot_params = np.array(boot_params)
 
-    # --- Step 4: Calculate final estimates and CIs ---
     param_ci_lower = np.nanpercentile(boot_params, (alpha/2)*100, axis=0)
     param_ci_upper = np.nanpercentile(boot_params, (1-alpha/2)*100, axis=0)
     
