@@ -50,8 +50,17 @@ C_T_VSHAPE_SLOPE = 75              # Slope for the V-shape function.
 C_T_CONSTANT_CASES = 500           # Case count if C_T_FUNCTION_TYPE is 'constant'.
 MIN_DRAWN_CASES = 20               # Absolute minimum for a day's case count.
 
-# Scalar for how intervention effects on CFR translate to effects on log(c_t)
-C_T_INTERVENTION_EFFECT_SCALAR = 0.5
+TRUE_BETA_ABS_K1 = [1.5]
+TRUE_BETA_ABS_K2 = [1.5, 1.0]
+TRUE_LAMBDA_K1 = [0.1]
+TRUE_LAMBDA_K2 = [0.1, 0.15]
+TRUE_T_K1_FACTOR = [0.5] 
+TRUE_T_K2_FACTOR = [0.33, 0.66]
+SIGNS_K1 = [-1]
+SIGNS_K2 = [-1, 1]
+
+# # Scalar for how intervention effects on CFR translate to effects on log(c_t)
+# C_T_INTERVENTION_EFFECT_SCALAR = 0.5
 
 # True Intervention Parameters (magnitudes increased for visual clarity)
 # TRUE_BETA_ABS_K1 = [1]
@@ -64,14 +73,14 @@ C_T_INTERVENTION_EFFECT_SCALAR = 0.5
 # SIGNS_K2 = [-1, 1]
 
 
-TRUE_BETA_ABS_K1 = [1]
-TRUE_BETA_ABS_K2 = [1, 1]
-TRUE_LAMBDA_K1 = [1]
-TRUE_LAMBDA_K2 = [1, 1]
-TRUE_T_K1_FACTOR = [0.5] 
-TRUE_T_K2_FACTOR = [0.33, 0.66]
-SIGNS_K1 = [-1]
-SIGNS_K2 = [-1, 1]
+# TRUE_BETA_ABS_K1 = [1]
+# TRUE_BETA_ABS_K2 = [1, 1]
+# TRUE_LAMBDA_K1 = [1]
+# TRUE_LAMBDA_K2 = [1, 1]
+# TRUE_T_K1_FACTOR = [0.5] 
+# TRUE_T_K2_FACTOR = [0.33, 0.66]
+# SIGNS_K1 = [-1]
+# SIGNS_K2 = [-1, 1]
 
 # ----------------------------------------------------------------------------
 # Scenario Definitions (12 scenarios)
