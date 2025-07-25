@@ -39,7 +39,9 @@ def get_ols_initial_values(Bm_obs, Z_input_obs, dt_obs, ct_obs, K_spline_obs, nu
         combined_basis = Bm_obs
 
     if num_interventions_K > 0 and Z_input_obs.shape[1] > 0:
-        combined_basis = np.concatenate([combined_basis, Z_input_obs], axis=1)
+        lambda_guess = 0.1 
+        lag_matrix_for_ols = 1 - np.exp(-lambda_guess * Z_input_obs)
+        combined_basis = np.concatenate([combined_basis, lag_matrix_for_ols], axis=1)
         
     try:
         ols = LinearRegression(fit_intercept=False).fit(combined_basis, logit_cCFR_target)
