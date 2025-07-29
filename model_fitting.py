@@ -89,7 +89,8 @@ def fit_proposed_model(sim_data, jax_prng_key):
         'Bm': sim_data["Bm_true"], 
         'Z': Z_for_sampler, 
         'beta_signs': sim_data["beta_signs_true"],
-        'use_constraint': config.USE_CONSTRAINT
+        'use_constraint': config.USE_CONSTRAINT,
+        'use_random_effect': config.USE_RANDOM_EFFECT
     }
     
     data_init = get_ols_initial_values(

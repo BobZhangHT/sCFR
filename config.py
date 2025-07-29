@@ -2,7 +2,7 @@ import os
 import numpy as np
 
 # --- General Simulation Parameters ---
-NUM_MONTE_CARLO_RUNS = 10  # Number of simulation runs for each scenario
+NUM_MONTE_CARLO_RUNS = 5  # Number of simulation runs for each scenario
 T_ANALYSIS_LENGTH = 200    # The length of the time series used for analysis
 T_SIMULATION_BUFFER = 60   # Additional time points for simulation burn-in to avoid edge effects
 T_SERIES_LENGTH_SIM = T_ANALYSIS_LENGTH + T_SIMULATION_BUFFER # Total simulation length
@@ -12,7 +12,8 @@ PENALTY_GRID_ALPHA = [0.01, 0.1, 1, 10, 100] # Grid for tuning alpha penalty in 
 PENALTY_GRID_BETA = [0.01, 0.1, 1, 10, 100] # Grid for tuning beta penalty in ITS model
 N_BOOTSTRAPS_ITS = 200     # Number of bootstrap samples for ITS confidence intervals
 OVERWRITE_EXISTING_RESULTS = True # If True, overwrite existing result files during a new run
-USE_CONSTRAINT = False     # If True, use sum-to-zero constraint on B-spline coefficients in the sCFR model
+USE_CONSTRAINT = False      # If True, use sum-to-zero constraint on B-spline coefficients in the sCFR model
+USE_RANDOM_EFFECT = False   # If True, adds a small random effect to the sCFR model
 
 # --- Data Generation Process (DGP) Parameters ---
 # Onset-to-Death Distribution (f_s) using a Gamma distribution
@@ -36,8 +37,8 @@ C_T_CONSTANT_CASES = 500           # Number of cases for 'constant' type
 MIN_DRAWN_CASES = 20               # Minimum number of cases on any day to ensure stability
 
 # True Intervention Parameters used in the DGP
-TRUE_BETA_ABS_K1 = [1.0]           # Absolute effect size for K=1 intervention
-TRUE_BETA_ABS_K2 = [1.0, 1.0]      # Absolute effect sizes for K=2 interventions
+TRUE_BETA_ABS_K1 = [1.5]           # Absolute effect size for K=1 intervention
+TRUE_BETA_ABS_K2 = [1.5, 1.0]      # Absolute effect sizes for K=2 interventions
 TRUE_LAMBDA_K1 = [0.1]             # Lag parameter for K=1 intervention
 TRUE_LAMBDA_K2 = [0.1, 0.1]        # Lag parameters for K=2 interventions
 TRUE_T_K1_FACTOR = [0.5]           # Relative timing for K=1 intervention

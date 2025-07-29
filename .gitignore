@@ -1,5 +1,6 @@
 /simulation_outputs
 /.ipynb_checkpoints
+/UK_analysis_outputs
 *.pdf
 *.ipynb
 *.npz

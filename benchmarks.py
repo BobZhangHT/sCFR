@@ -269,3 +269,22 @@ def calculate_its_with_penalized_mle(d_t, c_t, f_s, Bm, intervention_times_abs, 
         "its_lambda_lower": param_ci_lower[K_spline+K_interventions:] if K_interventions > 0 else np.array([]),
         "its_lambda_upper": param_ci_upper[K_spline+K_interventions:] if K_interventions > 0 else np.array([]),
     }
+
+def run_all_benchmarks(sim_data):
+    
+    benchmark_r_t_estimates = {
+        "cCFR_cumulative": calculate_crude_cfr(sim_data["d_t"], sim_data["c_t"], cumulative=True),
+        "aCFR_cumulative": calculate_nishiura_cfr_cumulative(sim_data["d_t"], sim_data["c_t"], sim_data["f_s_true"])
+    }
+    benchmark_cis = calculate_benchmark_cis_with_bayesian(sim_data["d_t"], sim_data["c_t"], sim_data["f_s_true"])
+    
+    its_results = calculate_its_with_penalized_mle(
+        d_t=sim_data["d_t"], c_t=sim_data["c_t"], f_s=sim_data["f_s_true"],
+        Bm=sim_data["Bm_true"],
+        intervention_times_abs=sim_data["true_intervention_times_0_abs"],
+        intervention_signs=sim_data["beta_signs_true"]
+    )
+
+    all_benchmark_results = {**benchmark_r_t_estimates, **benchmark_cis, **its_results}
+
+    return all_benchmark_results

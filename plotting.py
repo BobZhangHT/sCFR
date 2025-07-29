@@ -396,3 +396,73 @@ def plot_metric_summary_boxplots(results_df, output_dir):
                     plt.tight_layout()
                     plt.savefig(os.path.join(output_dir, f"summary_boxplot_{metric_suffix}_{param_base}_{k}.pdf"))
                     plt.close()
+
+def plot_combined_metrics_summary(results_df, output_dir):
+    """
+    Generates a single, combined 3x2 grid of boxplots for all performance metrics,
+    focusing on the comparison between sCFR and ITS.
+    """
+    if results_df.empty:
+        print("Metrics DataFrame is empty. Skipping combined plot generation.")
+        return
+
+    metric_info = {
+        'mae': {'title': 'MAE', 'rt_col': 'mae_rt', 'rcf_col': 'mae_rcf'},
+        'mciw': {'title': 'MCIW', 'rt_col': 'mciw_rt', 'rcf_col': 'mciw_rcf'},
+        'mcic': {'title': 'MCIC', 'rt_col': 'mcic_rt', 'rcf_col': 'mcic_rcf'}
+    }
+    
+    # --- MODIFIED: Only compare sCFR and ITS ---
+    models_to_compare = {"sCFR": "_sCFR", "ITS": "_its"}
+
+    fig, axes = plt.subplots(3, 2, figsize=(18, 15), sharex=True)
+    
+    axes[0, 0].set_title(r'Factual Estimator ($r_F$)', fontsize=18, pad=20)
+    axes[0, 1].set_title(r'Counterfactual Estimator ($r_{CF}$)', fontsize=18, pad=20)
+
+    for i, (metric_key, info) in enumerate(metric_info.items()):
+        # Factual Plot (Left Column)
+        plot_df_list_rt = []
+        for scen_id in results_df["scenario_id"].unique():
+            scen_df = results_df[results_df["scenario_id"] == scen_id]
+            for model_name, model_suffix in models_to_compare.items():
+                col_name = f"{info['rt_col']}{model_suffix}"
+                if col_name in scen_df.columns:
+                    plot_df_list_rt.append(pd.DataFrame({"scenario_id": scen_id, "Method": model_name, "value": scen_df[col_name]}))
+        
+        if plot_df_list_rt:
+            plot_df_rt = pd.concat(plot_df_list_rt).dropna(subset=['value'])
+            sns.boxplot(x="scenario_id", y="value", hue="Method", data=plot_df_rt, ax=axes[i, 0],
+                        order=[s["id"] for s in config.SCENARIOS], palette=MODEL_COLORS)
+            axes[i, 0].set_ylabel(info['title'], fontsize=14)
+            axes[i, 0].legend().set_visible(False)
+
+        # Counterfactual Plot (Right Column)
+        plot_df_list_rcf = []
+        for scen_id in results_df["scenario_id"].unique():
+            scen_df = results_df[results_df["scenario_id"] == scen_id]
+            for model_name, model_suffix in models_to_compare.items():
+                col_name = f"{info['rcf_col']}{model_suffix}"
+                if col_name in scen_df.columns:
+                    plot_df_list_rcf.append(pd.DataFrame({"scenario_id": scen_id, "Method": model_name, "value": scen_df[col_name]}))
+        
+        if plot_df_list_rcf:
+            plot_df_rcf = pd.concat(plot_df_list_rcf).dropna(subset=['value'])
+            sns.boxplot(x="scenario_id", y="value", hue="Method", data=plot_df_rcf, ax=axes[i, 1],
+                        order=[s["id"] for s in config.SCENARIOS], palette=MODEL_COLORS)
+            axes[i, 1].set_ylabel("") 
+            axes[i, 1].legend().set_visible(False)
+
+    axes[2, 0].set_xlabel("Scenario ID", fontsize=14)
+    axes[2, 1].set_xlabel("Scenario ID", fontsize=14)
+    for ax in axes.flatten():
+        ax.tick_params(axis='x', rotation=45)
+
+    handles, labels = axes[0, 0].get_legend_handles_labels()
+    fig.legend(handles, labels, loc='lower center', ncol=2, bbox_to_anchor=(0.5, 0.01), title="Method")
+    
+    plt.tight_layout(rect=[0, 0.05, 1, 0.95])
+    fig.suptitle("Summary of Performance Metrics Across All Scenarios", fontsize=24, y=0.99)
+    
+    plt.savefig(os.path.join(output_dir, "summary_boxplot_combined_metrics.pdf"))
+    plt.close(fig)

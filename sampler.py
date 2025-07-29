@@ -18,7 +18,7 @@ def create_sum_to_zero_contrast_matrix(J):
     C = jnp.vstack([jnp.eye(J - 1), -jnp.ones((1, J - 1))])
     return C
 
-def model(N, K, Bm, Z, beta_signs, dt, fc_mat, use_constraint=False):
+def model(N, K, Bm, Z, beta_signs, dt, fc_mat, use_constraint=False, use_random_effect=False):
     """
     The Bayesian model for fatality rate estimation using a B-spline basis.
 
@@ -31,6 +31,7 @@ def model(N, K, Bm, Z, beta_signs, dt, fc_mat, use_constraint=False):
         dt (jnp.ndarray): Observed daily number of deaths.
         fc_mat (jnp.ndarray): The convolution matrix (Q).
         use_constraint (bool): Flag to indicate whether to use sum-to-zero constraints on alpha.
+        use_random_effect (bool): Flag to include a small random effect.
     """
     K_alpha_dim = K 
     K_beta_dim = Z.shape[1] if Z.ndim == 2 and Z.shape[1] > 0 else 0
@@ -63,10 +64,15 @@ def model(N, K, Bm, Z, beta_signs, dt, fc_mat, use_constraint=False):
         numpyro.deterministic("beta_abs", jnp.array([]))
     
     M = jnp.dot(Bm, alpha)
-    I = I_eff
+
+    if use_random_effect:
+        sigma_eta = numpyro.sample('sigma_eta', dist.HalfCauchy(1.0))
+        eta = numpyro.sample('eta', dist.Normal(0, sigma_eta).expand([N]))
+    else:
+        eta = jnp.zeros(N)
     
-    logit_p_cf = M 
-    logit_p = M + I    
+    logit_p_cf = M + eta
+    logit_p = M + I_eff + eta
     
     p_cf = jax.scipy.special.expit(logit_p_cf) 
     p = jax.scipy.special.expit(logit_p)      
