@@ -4,3 +4,4 @@
 *.pdf
 *.ipynb
 *.npz
+*.pyc
