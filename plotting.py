@@ -133,8 +133,8 @@ def plot_aggregated_factual_summary(aggregated_plot_data, output_dir):
     handles, labels = axes[0, 0].get_legend_handles_labels()
     
     fig.legend(handles, labels, loc='lower center', ncol=5, bbox_to_anchor=(0.5, 0.03))
-    fig.suptitle("Aggregated Factual CFR Estimation Across All Scenarios", fontsize=24, y=0.98)
-    plt.tight_layout(rect=[0.05, 0.07, 1, 0.95])
+    fig.suptitle("Aggregated Factual CFR Estimation Across All Scenarios", fontsize=24, x=0.55, y=0.96)
+    plt.tight_layout(rect=[0.03, 0.07, 0.97, 0.95])
     plt.savefig(os.path.join(output_dir, "aggregate_summary_plot_F.pdf"))
     plt.close(fig)
 
@@ -189,8 +189,8 @@ def plot_aggregated_counterfactual_summary(aggregated_plot_data, output_dir):
 
     handles, labels = axes[0, 0].get_legend_handles_labels()
     fig.legend(handles, labels, loc='lower center', ncol=3, bbox_to_anchor=(0.5, 0.03))
-    fig.suptitle("Aggregated Counterfactual CFR Estimation Across All Scenarios", fontsize=24, y=0.98)
-    plt.tight_layout(rect=[0.05, 0.07, 1, 0.95])
+    fig.suptitle("Aggregated Counterfactual CFR Estimation Across All Scenarios", fontsize=24, x=0.55, y=0.96)
+    plt.tight_layout(rect=[0.03, 0.07, 0.97, 0.95])
     plt.savefig(os.path.join(output_dir, "aggregate_summary_plot_CF.pdf"))
     plt.close(fig)
 
