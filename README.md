@@ -1,10 +1,6 @@
-
-
 # A Bayesian Semiparametric Framework for Factual and Counterfactual Time-Varying Case Fatality Rate Estimation
 
 This repository contains the complete source code and simulation framework for the manuscript, "A Bayesian Semiparametric Framework for Factual and Counterfactual Time-Varying Case Fatality Rate Estimation." The paper introduces a robust Bayesian semiparametric model to estimate the time-varying Case Fatality Rate (CFR) while accounting for reporting delays and the confounding effects of non-pharmaceutical interventions (NPIs).
-
-***
 
 ## Key Features
 
@@ -17,8 +13,6 @@ This repository contains the complete source code and simulation framework for t
 * **Simulation & Analysis Pipeline**: Includes a complete, parallelized pipeline for running Monte Carlo simulations and analyzing results.
 
 * **Real Data Application**: Code to replicate the analysis of COVID-19 data in the UK.
-
-  ***
 
 ## Getting Started
 
@@ -54,8 +48,6 @@ After the simulation is complete, you can use the `Simu_Data_Analysis.ipynb` not
 
 The analysis of the UK COVID-19 data can be reproduced by running the cells in the `UK_Analysis.ipynb` notebook. Please ensure the `WHO-COVID-19-global-daily-data.csv` dataset is in the root directory.
 
-***
-
 ## Contact
 
 For any questions, comments, or suggestions, please feel free to contact the first author or corresponding author:
@@ -63,8 +55,6 @@ For any questions, comments, or suggestions, please feel free to contact the fir
 * Hengtao Zhang: zhanght@gdou.edu.cn
 
 * Yuanke Qu: quxiaoke@gdou.edu.cn
-
-***
 
 ## Citation
 
