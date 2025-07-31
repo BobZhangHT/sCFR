@@ -407,13 +407,13 @@ def plot_combined_metrics_summary(results_df, output_dir):
         return
 
     metric_info = {
-        'mae': {'title': 'MAE', 'rt_col': 'mae_rt', 'rcf_col': 'mae_rcf'},
-        'mciw': {'title': 'MCIW', 'rt_col': 'mciw_rt', 'rcf_col': 'mciw_rcf'},
-        'mcic': {'title': 'MCIC', 'rt_col': 'mcic_rt', 'rcf_col': 'mcic_rcf'}
+        'mae': {'title': 'Mean Absolute Error (MAE)', 'rt_col': 'mae_rt', 'rcf_col': 'mae_rcf'},
+        'mciw': {'title': 'Mean Credible Interval Width (MCIW)', 'rt_col': 'mciw_rt', 'rcf_col': 'mciw_rcf'},
+        'mcic': {'title': 'Mean Credible Interval Coverage (MCIC)', 'rt_col': 'mcic_rt', 'rcf_col': 'mcic_rcf'}
     }
     
-    # --- MODIFIED: Only compare sCFR and ITS ---
-    models_to_compare = {"sCFR": "_sCFR", "ITS": "_its"}
+    models_rt = {"sCFR": "_sCFR", "ITS": "_its"}
+    models_rcf = {"sCFR": "_sCFR", "ITS": "_its"}
 
     fig, axes = plt.subplots(3, 2, figsize=(18, 15), sharex=True)
     
@@ -422,36 +422,42 @@ def plot_combined_metrics_summary(results_df, output_dir):
 
     for i, (metric_key, info) in enumerate(metric_info.items()):
         # Factual Plot (Left Column)
+        ax_rt = axes[i, 0]
         plot_df_list_rt = []
         for scen_id in results_df["scenario_id"].unique():
             scen_df = results_df[results_df["scenario_id"] == scen_id]
-            for model_name, model_suffix in models_to_compare.items():
+            for model_name, model_suffix in models_rt.items():
                 col_name = f"{info['rt_col']}{model_suffix}"
                 if col_name in scen_df.columns:
                     plot_df_list_rt.append(pd.DataFrame({"scenario_id": scen_id, "Method": model_name, "value": scen_df[col_name]}))
         
         if plot_df_list_rt:
             plot_df_rt = pd.concat(plot_df_list_rt).dropna(subset=['value'])
-            sns.boxplot(x="scenario_id", y="value", hue="Method", data=plot_df_rt, ax=axes[i, 0],
+            sns.boxplot(x="scenario_id", y="value", hue="Method", data=plot_df_rt, ax=ax_rt,
                         order=[s["id"] for s in config.SCENARIOS], palette=MODEL_COLORS)
-            axes[i, 0].set_ylabel(info['title'], fontsize=14)
-            axes[i, 0].legend().set_visible(False)
+            ax_rt.set_ylabel(info['title'], fontsize=14)
+            ax_rt.legend().set_visible(False)
 
         # Counterfactual Plot (Right Column)
+        ax_rcf = axes[i, 1]
         plot_df_list_rcf = []
         for scen_id in results_df["scenario_id"].unique():
             scen_df = results_df[results_df["scenario_id"] == scen_id]
-            for model_name, model_suffix in models_to_compare.items():
+            for model_name, model_suffix in models_rcf.items():
                 col_name = f"{info['rcf_col']}{model_suffix}"
                 if col_name in scen_df.columns:
                     plot_df_list_rcf.append(pd.DataFrame({"scenario_id": scen_id, "Method": model_name, "value": scen_df[col_name]}))
         
         if plot_df_list_rcf:
             plot_df_rcf = pd.concat(plot_df_list_rcf).dropna(subset=['value'])
-            sns.boxplot(x="scenario_id", y="value", hue="Method", data=plot_df_rcf, ax=axes[i, 1],
+            sns.boxplot(x="scenario_id", y="value", hue="Method", data=plot_df_rcf, ax=ax_rcf,
                         order=[s["id"] for s in config.SCENARIOS], palette=MODEL_COLORS)
-            axes[i, 1].set_ylabel("") 
-            axes[i, 1].legend().set_visible(False)
+            ax_rcf.set_ylabel("") 
+            ax_rcf.legend().set_visible(False)
+
+        if metric_key == 'mcic':
+            ax_rt.axhline(y=0.95, color='r', linestyle='--', linewidth=1.5, zorder=0)
+            ax_rcf.axhline(y=0.95, color='r', linestyle='--', linewidth=1.5, zorder=0)
 
     axes[2, 0].set_xlabel("Scenario ID", fontsize=14)
     axes[2, 1].set_xlabel("Scenario ID", fontsize=14)
@@ -459,7 +465,7 @@ def plot_combined_metrics_summary(results_df, output_dir):
         ax.tick_params(axis='x', rotation=45)
 
     handles, labels = axes[0, 0].get_legend_handles_labels()
-    fig.legend(handles, labels, loc='lower center', ncol=2, bbox_to_anchor=(0.5, 0.01), title="Method")
+    fig.legend(handles, labels, loc='lower center', ncol=4, bbox_to_anchor=(0.5, 0.01), title="Method")
     
     plt.tight_layout(rect=[0, 0.05, 1, 0.95])
     fig.suptitle("Summary of Performance Metrics Across All Scenarios", fontsize=24, y=0.99)
