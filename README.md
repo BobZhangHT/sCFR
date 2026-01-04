@@ -4,7 +4,7 @@ This repository contains the complete source code and simulation framework for t
 
 ## Key Features
 
-* **Bayesian Semiparametric Mode**l: A flexible model that separates smooth baseline trends from sharp intervention shocks.
+* **Bayesian Semiparametric Model**: A flexible model that separates smooth baseline trends from sharp intervention shocks.
 
 * **Causal Inference**: Enables the estimation of counterfactual outcomes (what would have happened without NPIs).
 
@@ -38,23 +38,140 @@ This repository contains the complete source code and simulation framework for t
 
 ### Running the Simulation Study
 
-The entire simulation study can be executed by running the main script `Simulation.ipynb`. This will perform all Monte Carlo runs for the 12 scenarios defined in `config.py` and save the results to the `simulation_outputs/ directory`.
+The entire simulation study can be executed using the command-line script `simulation.py`. This script provides both simulation and analysis modes with automatic checkpoint support.
+
+#### Quick Start
+
+```bash
+# Run demo mode (5 runs per scenario) with automatic analysis
+python simulation.py --simulate --demo
+
+# Run full mode (all configured runs) with automatic analysis
+python simulation.py --simulate --full
+
+# Run analysis only on existing results
+python simulation.py --analyze
+
+# Reset all outputs and start fresh
+python simulation.py --simulate --full --reset
+```
+
+#### Command-Line Options
+
+- `--simulate`: Run simulation mode (generates data and fits models)
+- `--analyze`: Run analysis mode only (generates plots and tables from existing results)
+- `--demo`: Demo mode with 5 runs per scenario (for quick testing)
+- `--full`: Full mode with all configured runs (default)
+- `--reset`: Clear all output directories before starting (requires confirmation)
+- `--jobs N`: Number of parallel jobs (default: `NUM_CORES_TO_USE` from config)
+
+#### Automatic Analysis
+
+When using `--simulate --full` or `--simulate --demo`, the script will **automatically** run analysis after simulation completes, generating:
+
+**Plots** (in `simulation_outputs/plots/`):
+- `aggregated_factual_summary.png` - Factual CFR estimates across all scenarios
+- `aggregated_counterfactual_summary.png` - Counterfactual CFR estimates
+- `metric_summary_boxplots_mae.png` - MAE boxplots by model
+- `combined_metrics_summary.png` - Combined metrics summary
+
+**Tables** (in `simulation_outputs/results_csv/`):
+- `all_scenarios_metrics_aggregated.csv` - Aggregated metrics (mean and std)
+
+**LaTeX Tables** (in `simulation_outputs/tables/`):
+- Formatted tables for manuscript inclusion
+
+#### Checkpoint Support
+
+The script supports automatic checkpointing:
+- If a run is interrupted, you can resume it later
+- The script will skip completed runs (based on existing metrics JSON files)
+- Continue from where it left off
 
 ### Analyzing the Results
 
-After the simulation is complete, you can use the `Simu_Data_Analysis.ipynb` notebook to load the saved results, generate the summary plots (as seen in the manuscript), and create the final LaTeX tables.
+After the simulation is complete, you can use the `--analyze` flag to generate plots and tables:
+
+```bash
+python simulation.py --analyze
+```
 
 ### UK Real Data Application
 
-The analysis of the UK COVID-19 data can be reproduced by running the cells in the `UK_Analysis.ipynb` notebook. Please ensure the `WHO-COVID-19-global-daily-data.csv` dataset is in the root directory.
+The analysis of the UK COVID-19 data can be reproduced by running the cells in the `UK_Analysis.ipynb` notebook. Please ensure that the `WHO-COVID-19-global-daily-data.csv` dataset is in the root directory.
+
+## Project Structure
+
+```
+BICE-CFR/
+├── config.py                           # Configuration parameters
+├── data_generation.py                  # Data generation functions
+├── methods.py                          # Model fitting and benchmark methods (NO CI for fsCFR, aCFR, cCFR)
+├── evaluation.py                       # Unified evaluation and visualization module
+├── simulation.py                       # Main simulation and analysis script
+├── evaluation_original.py                # Original evaluation module (for reference)
+├── plotting_original.py                  # Original plotting module (for reference)
+├── Simu_Data_Analysis.ipynb         # Original analysis notebook (for reference)
+├── Simulation.ipynb                    # Original simulation notebook (for reference)
+├── UK_Analysis.ipynb                  # UK real data analysis
+├── README.md                           # This file
+```
+
+## Key Modules
+
+### evaluation.py
+
+Unified evaluation and visualization module that combines metric calculation with plotting functionality. Provides:
+
+- **Data Classes**: `PosteriorEstimates`, `ModelEvaluationResult`, `ScenarioEvaluationResult`, `AggregatedEvaluationResult`
+- **Main Class**: `CFREvaluatorVisualizer` with comprehensive methods for evaluation and visualization
+- **Convenience Functions**: For backward compatibility with original modules
+
+### methods.py
+
+Provides unified methods for benchmark calculations, model fitting, and statistical analysis:
+
+- **Benchmark CFR Calculations**: `cCFR_model()`, `aCFR_model()` (NO confidence intervals)
+- **fsCFR Model**: `fsCFR_model()` (NO confidence intervals)
+- **sCFR Model**: `sCFR_model()`, `run_numpyro_sampler()`, `fit_proposed_model()` (with full Bayesian CI)
+- **Note**: Only sCFR retains confidence interval estimation; fsCFR, aCFR, and cCFR provide point estimates only
+
+### simulation.py
+
+Main script for running simulations and analysis:
+
+- **Simulation Mode**: Runs Monte Carlo simulations with checkpoint support
+- **Analysis Mode**: Generates plots and tables from existing results
+- **Automatic Analysis**: Automatically runs analysis after simulation completes
+- **Parallel Processing**: Uses joblib for parallel execution
+
+## Output Structure
+
+After running simulations and analysis, `simulation_outputs/` directory will contain:
+
+```
+simulation_outputs/
+├── plots/                              # Generated visualizations
+│   ├── aggregated_factual_summary.png
+│   ├── aggregated_counterfactual_summary.png
+│   ├── metric_summary_boxplots_mae.png
+│   └── combined_metrics_summary.png
+├── tables/                             # LaTeX tables for manuscript
+├── results_csv/                         # CSV files with metrics
+│   └── all_scenarios_metrics_aggregated.csv
+├── posterior_samples/                    # Saved posterior samples
+├── benchmark_results/                    # Benchmark method results
+├── posterior_summaries/                  # Posterior summary statistics
+└── run_metrics_json/                    # Individual run metrics
+```
 
 ## Contact
 
 For any questions, comments, or suggestions, please feel free to contact the first author or corresponding author:
 
-* Hengtao Zhang: zhanght@gdou.edu.cn
+* Hengtao Zhang: zhanght@gdou.edu.cn
 
-* Yuanke Qu: quxiaoke@gdou.edu.cn
+* Yuanke Qu: quxiaoke@gdou.edu.cn
 
 ## Citation
 
@@ -69,3 +186,9 @@ If you use this code or model in your research, please cite our manuscript:
 }
 ```
 
+## Additional Documentation
+
+- **[`USAGE_GUIDE.md`](USAGE_GUIDE.md)**: Comprehensive usage guide for the refactored project
+- **[`AUTOMATIC_ANALYSIS_FEATURE.md`](AUTOMATIC_ANALYSIS_FEATURE.md)**: Documentation of the automatic analysis feature
+- **[`CONSISTENCY_CHECK_AND_MERGE_REPORT.md`](CONSISTENCY_CHECK_AND_MERGE_REPORT.md)**: Report on consistency fixes and merge
+- **[`REFACTORING_SUMMARY.md`](REFACTORING_SUMMARY.md)**: Summary of refactoring work

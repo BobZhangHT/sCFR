@@ -4,3 +4,4 @@
 *.pdf
 *.npz
 *.pyc
+/real_data_outputs
