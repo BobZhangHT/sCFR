@@ -1,4 +1,4 @@
-# A Bayesian Semiparametric Framework for Factual and Counterfactual Time-Varying Case Fatality Rate Estimation
+﻿# A Bayesian Semiparametric Framework for Factual and Counterfactual Time-Varying Case Fatality Rate Estimation
 
 This repository contains the complete source code and simulation framework for the manuscript, "A Bayesian Semiparametric Framework for Factual and Counterfactual Time-Varying Case Fatality Rate Estimation." The paper introduces a robust Bayesian semiparametric model to estimate the time-varying Case Fatality Rate (CFR) while accounting for reporting delays and the confounding effects of non-pharmaceutical interventions (NPIs).
 
@@ -19,21 +19,13 @@ This repository contains the complete source code and simulation framework for t
 ### Prerequisites
 
 * Python 3.8+
-
 * JAX
-
 * NumPyro
-
+* NumPy
+* SciPy
 * pandas
-
-* scikit-learn
-
-* statsmodels
-
 * matplotlib
-
 * joblib
-
 * tqdm
 
 ### Running the Simulation Study
@@ -98,23 +90,27 @@ python simulation.py --analyze
 
 ### UK Real Data Application
 
-The analysis of the UK COVID-19 data can be reproduced by running the cells in the `UK_Analysis.ipynb` notebook. Please ensure that the `WHO-COVID-19-global-daily-data.csv` dataset is in the root directory.
+You can run the UK analysis from the command line:
+
+```bash
+python real_data_analysis.py
+```
+
+Outputs are written to `./real_data_outputs/`. Set `PLOT_FULL = True` inside `real_data_analysis.py` if you want to include benchmark curves (cCFR, aCFR, fsCFR).
 
 ## Project Structure
 
 ```
 BICE-CFR/
-├── config.py                           # Configuration parameters
-├── data_generation.py                  # Data generation functions
-├── methods.py                          # Model fitting and benchmark methods (NO CI for fsCFR, aCFR, cCFR)
-├── evaluation.py                       # Unified evaluation and visualization module
-├── simulation.py                       # Main simulation and analysis script
-├── evaluation_original.py                # Original evaluation module (for reference)
-├── plotting_original.py                  # Original plotting module (for reference)
-├── Simu_Data_Analysis.ipynb         # Original analysis notebook (for reference)
-├── Simulation.ipynb                    # Original simulation notebook (for reference)
-├── UK_Analysis.ipynb                  # UK real data analysis
-├── README.md                           # This file
+- config.py                           # Configuration parameters
+- data_generation.py                  # Data generation functions
+- methods.py                          # Model fitting and benchmark methods (NO CI for fsCFR, aCFR, cCFR)
+- evaluation.py                       # Unified evaluation and visualization module
+- simulation.py                       # Main simulation and analysis script
+- real_data_analysis.py               # UK real data analysis (CLI)
+- UK_Analysis.ipynb                   # UK real data analysis (notebook)
+- WHO-COVID-19-global-daily-data.csv  # WHO daily data (place in repo root)
+- README.md                           # This file
 ```
 
 ## Key Modules
@@ -133,7 +129,7 @@ Provides unified methods for benchmark calculations, model fitting, and statisti
 
 - **Benchmark CFR Calculations**: `cCFR_model()`, `aCFR_model()` (NO confidence intervals)
 - **fsCFR Model**: `fsCFR_model()` (NO confidence intervals)
-- **sCFR Model**: `sCFR_model()`, `run_numpyro_sampler()`, `fit_proposed_model()` (with full Bayesian CI)
+- **sCFR Model**: `sCFR_model()`, `run_numpyro_sampler()`, `fit_proposed_model()` (with Bayesian CI)
 - **Note**: Only sCFR retains confidence interval estimation; fsCFR, aCFR, and cCFR provide point estimates only
 
 ### simulation.py
@@ -151,18 +147,19 @@ After running simulations and analysis, `simulation_outputs/` directory will con
 
 ```
 simulation_outputs/
-├── plots/                              # Generated visualizations
-│   ├── aggregated_factual_summary.png
-│   ├── aggregated_counterfactual_summary.png
-│   ├── metric_summary_boxplots_mae.png
-│   └── combined_metrics_summary.png
-├── tables/                             # LaTeX tables for manuscript
-├── results_csv/                         # CSV files with metrics
-│   └── all_scenarios_metrics_aggregated.csv
-├── posterior_samples/                    # Saved posterior samples
-├── benchmark_results/                    # Benchmark method results
-├── posterior_summaries/                  # Posterior summary statistics
-└── run_metrics_json/                    # Individual run metrics
+- plots/                                # Generated visualizations
+  - aggregated_factual_summary.png
+  - aggregated_counterfactual_summary.png
+  - metric_summary_boxplots_mae.png
+  - combined_metrics_summary.png
+- tables/                               # LaTeX tables for manuscript
+- results_csv/                          # CSV files with metrics
+  - all_scenarios_metrics_aggregated.csv
+- posterior_samples_raw/                # Saved posterior samples
+- benchmarks_results/                   # Benchmark method results
+- posterior_summaries/                  # Posterior summary statistics
+- run_metrics_json/                     # Individual run metrics
+- logs/                                 # Error logs and analysis summary
 ```
 
 ## Contact
@@ -172,23 +169,3 @@ For any questions, comments, or suggestions, please feel free to contact the fir
 * Hengtao Zhang: zhanght@gdou.edu.cn
 
 * Yuanke Qu: quxiaoke@gdou.edu.cn
-
-## Citation
-
-If you use this code or model in your research, please cite our manuscript:
-
-```latex
-@article{zhang2025scfr,
-  title={A Bayesian Semiparametric Framework for Factual and Counterfactual Time-Varying Case Fatality Rate Estimation},
-  author={Zhang, Hengtao and Lee, Chun Yin and Qu, Yuanke},
-  year={2025},
-  journal={Working Paper}
-}
-```
-
-## Additional Documentation
-
-- **[`USAGE_GUIDE.md`](USAGE_GUIDE.md)**: Comprehensive usage guide for the refactored project
-- **[`AUTOMATIC_ANALYSIS_FEATURE.md`](AUTOMATIC_ANALYSIS_FEATURE.md)**: Documentation of the automatic analysis feature
-- **[`CONSISTENCY_CHECK_AND_MERGE_REPORT.md`](CONSISTENCY_CHECK_AND_MERGE_REPORT.md)**: Report on consistency fixes and merge
-- **[`REFACTORING_SUMMARY.md`](REFACTORING_SUMMARY.md)**: Summary of refactoring work
