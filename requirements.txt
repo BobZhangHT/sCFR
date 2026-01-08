@@ -1,0 +1,8 @@
+JAX
+numpyro
+numpy
+scipy
+pandas
+matplotlib
+joblib
+tqdm

@@ -1,14 +1,16 @@
 """
-Methods module for sCFR project.
+Methods module for CFR estimation.
 
-This module provides unified methods for benchmark calculations, model fitting,
-and statistical analysis in Case Fatality Rate (CFR) estimation framework.
+This module provides:
+- Benchmark CFR methods: cCFR (crude), aCFR (adjusted)
+- Frequentist sCFR (fsCFR) via penalized MLE
+- Bayesian sCFR model using NumPyro
 
-MAJOR UPDATES:
-1. Merged 'sampler.py' functionality into 'sCFR_model' and 'run_numpyro_sampler'.
-2. Refactored Intervention Effect to use Step + Hinge functions.
-3. Added fsCFR_model as a frequentist counterpart with REML-tuned penalties.
-4. No confidence intervals for benchmark methods (only sCFR retains CI).
+Model structure:
+- Baseline: B-spline with RW2 penalty
+- Random effect: i.i.d. Gaussian with HalfCauchy prior on scale
+- Intervention: Step + Hinge functions with LogNormal priors
+- Likelihood: Poisson
 """
 
 from typing import Dict, List, Tuple, Optional, Any
@@ -22,16 +24,14 @@ import numpyro
 import numpyro.distributions as dist
 from numpyro.infer import MCMC, NUTS
 import config
+import warnings
+
 
 # =============================================================================
-# UTILITY FUNCTIONS
+# Utility Functions
 # =============================================================================
 
-def construct_Q_matrix(
-    c_t: np.ndarray,
-    f_s: np.ndarray,
-    T_sim: int
-) -> np.ndarray:
+def construct_Q_matrix(c_t: np.ndarray, f_s: np.ndarray, T_sim: int) -> np.ndarray:
     """Construct convolution matrix Q from daily cases and delay distribution."""
     N = T_sim
     fs_padded = np.zeros(N)
@@ -47,11 +47,8 @@ def construct_Q_matrix(
     return f_matrix_conv @ np.diag(c_t)
 
 
-
-
-
 # =============================================================================
-# BENCHMARK CFR CALCULATIONS
+# Benchmark CFR Methods
 # =============================================================================
 
 def cCFR_model(
@@ -99,264 +96,14 @@ def aCFR_model(
 
 
 # =============================================================================
-# FREQUENTIST sCFR (fsCFR) MODEL - PENALIZED MLE WITH REML
+# Frequentist sCFR (fsCFR) Model
 # =============================================================================
 
-def fsCFR_model(
-    d_t: np.ndarray,
-    c_t: np.ndarray,
-    f_s: np.ndarray,
-    Bm: np.ndarray,
-    intervention_times_abs: List[int],
-    intervention_signs: List[int]
-) -> Dict[str, np.ndarray]:
-    """
-    Frequentist semiparametric counterpart to sCFR with REML-tuned penalties.
-
-    Model:
-      eta = Bm @ alpha + delta + Z @ beta_step + Z_hinge @ beta_slope
-      r_t = sigmoid(eta), d_t ~ Poisson(Q r_t)
-
-    Penalties:
-      p_alpha * ||D2 alpha||^2 + p_delta * ||delta||^2 + p_beta * (||beta_step||^2 + ||beta_slope||^2)
-    """
-    T, J = Bm.shape
-    K = len(intervention_times_abs)
-    intervention_signs = np.asarray(intervention_signs, dtype=float)
-
-    Q_matrix = construct_Q_matrix(c_t, f_s, T)
-
-    # Step basis Z and hinge basis
-    Z_step = np.zeros((T, K))
-    t_array = np.arange(T, dtype=float) / max(T - 1, 1)
-    if K > 0:
-        for k in range(K):
-            t_k = intervention_times_abs[k] / max(T - 1, 1)
-            Z_step[:, k] = (t_array >= t_k).astype(float)
-    denom = max(T - 1, 1)
-    Z_hinge = (np.cumsum(Z_step, axis=0) - Z_step) / denom
-
-    # Second difference matrix for alpha
-    def second_diff_matrix(k: int) -> np.ndarray:
-        if k < 3:
-            return np.zeros((0, k))
-        d2 = np.zeros((k - 2, k))
-        for i in range(k - 2):
-            d2[i, i:i+3] = [1, -2, 1]
-        return d2
-
-    D2 = second_diff_matrix(J)
-    num_params = J + T + (2 * K)
-
-    def objective_func(
-        params: np.ndarray,
-        p_alpha: float,
-        p_delta: float,
-        p_beta: float
-    ) -> float:
-        alpha = params[:J]
-        delta = params[J:J + T]
-        beta_step_abs = params[J + T:J + T + K] if K > 0 else np.array([])
-        beta_slope_abs = params[J + T + K:] if K > 0 else np.array([])
-
-        eta = Bm @ alpha + delta
-        if K > 0:
-            beta_step = beta_step_abs * intervention_signs
-            beta_slope = beta_slope_abs * intervention_signs
-            eta = eta + Z_step @ beta_step + Z_hinge @ beta_slope
-        if not np.all(np.isfinite(eta)):
-            return 1e12
-
-        r_t = sigmoid(eta)
-        if not np.all(np.isfinite(r_t)):
-            return 1e12
-        mu = Q_matrix @ r_t
-        if not np.all(np.isfinite(mu)):
-            return 1e12
-        mu = np.maximum(mu, 1e-9)
-        nll = -np.sum(d_t * np.log(mu) - mu)
-        if not np.isfinite(nll):
-            return 1e12
-
-        penalty = 0.0
-        if D2.shape[0] > 0:
-            diff2 = D2 @ alpha
-            penalty += p_alpha * np.sum(diff2 ** 2)
-        penalty += p_delta * np.sum(delta ** 2)
-        if K > 0:
-            penalty += p_beta * (np.sum(beta_step_abs ** 2) + np.sum(beta_slope_abs ** 2))
-        total = nll + penalty
-        if not np.isfinite(total):
-            return 1e12
-        return float(total)
-
-    def build_penalty_matrix(p_alpha: float, p_delta: float, p_beta: float) -> np.ndarray:
-        S = np.zeros((num_params, num_params))
-        if D2.shape[0] > 0:
-            S_alpha = p_alpha * (D2.T @ D2)
-            S[:J, :J] = S_alpha
-        S[J:J + T, J:J + T] = p_delta * np.eye(T)
-        if K > 0:
-            S[J + T:, J + T:] = p_beta * np.eye(2 * K)
-        return S
-
-    def jacobian_eta(params: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-        alpha = params[:J]
-        delta = params[J:J + T]
-        beta_step_abs = params[J + T:J + T + K] if K > 0 else np.array([])
-        beta_slope_abs = params[J + T + K:] if K > 0 else np.array([])
-
-        eta = Bm @ alpha + delta
-        d_eta = np.zeros((T, num_params))
-        d_eta[:, :J] = Bm
-        d_eta[:, J:J + T] = np.eye(T)
-        if K > 0:
-            beta_step = beta_step_abs * intervention_signs
-            beta_slope = beta_slope_abs * intervention_signs
-            eta = eta + Z_step @ beta_step + Z_hinge @ beta_slope
-            d_eta[:, J + T:J + T + K] = Z_step * intervention_signs
-            d_eta[:, J + T + K:] = Z_hinge * intervention_signs
-        return eta, d_eta
-
-    def jacobian_mu(params: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-        eta, d_eta = jacobian_eta(params)
-        r_t = sigmoid(eta)
-        dr_deta = r_t * (1 - r_t)
-        dr_dtheta = dr_deta[:, None] * d_eta
-        J_mu = Q_matrix @ dr_dtheta
-        return r_t, J_mu
-
-    def reml_criterion(log_penalties: np.ndarray) -> float:
-        p_alpha = float(np.exp(log_penalties[0]))
-        p_delta = float(np.exp(log_penalties[1]))
-        p_beta = float(np.exp(log_penalties[2])) if K > 0 else 0.0
-
-        res = minimize(
-            objective_func, x0=p0,
-            args=(p_alpha, p_delta, p_beta),
-            method='L-BFGS-B', bounds=bounds
-        )
-        if not res.success:
-            return 1e12
-
-        params_hat = res.x
-        eta_hat, _ = jacobian_eta(params_hat)
-        r_t_hat = sigmoid(eta_hat)
-        mu_hat = np.maximum(Q_matrix @ r_t_hat, 1e-9)
-        log_like = np.sum(d_t * np.log(mu_hat) - mu_hat)
-
-        penalty_term = 0.0
-        if D2.shape[0] > 0:
-            diff2 = D2 @ params_hat[:J]
-            penalty_term += p_alpha * np.sum(diff2 ** 2)
-        delta_hat = params_hat[J:J + T]
-        penalty_term += p_delta * np.sum(delta_hat ** 2)
-        if K > 0:
-            beta_step_abs = params_hat[J + T:J + T + K]
-            beta_slope_abs = params_hat[J + T + K:]
-            penalty_term += p_beta * (np.sum(beta_step_abs ** 2) + np.sum(beta_slope_abs ** 2))
-
-        _, J_mu = jacobian_mu(params_hat)
-        weight = 1.0 / np.maximum(mu_hat, 1e-9)
-        H = J_mu.T @ (J_mu * weight[:, None])
-
-        S = build_penalty_matrix(p_alpha, p_delta, p_beta)
-        S_plus_H = H + S
-
-        def safe_logdet_pd(mat: np.ndarray) -> Optional[float]:
-            mat_sym = 0.5 * (mat + mat.T)
-            for jitter in (1e-10, 1e-8, 1e-6, 1e-4):
-                try:
-                    L = np.linalg.cholesky(mat_sym + jitter * np.eye(mat_sym.shape[0]))
-                    return float(2.0 * np.sum(np.log(np.diag(L))))
-                except np.linalg.LinAlgError:
-                    continue
-            return None
-
-        logdet_hs = safe_logdet_pd(S_plus_H)
-        if logdet_hs is None or not np.isfinite(logdet_hs):
-            return 1e12
-
-        eigvals_S = None
-        S_sym = 0.5 * (S + S.T)
-        for jitter in (0.0, 1e-10, 1e-8, 1e-6):
-            try:
-                eigvals_S = np.linalg.eigvalsh(S_sym + jitter * np.eye(num_params))
-                break
-            except np.linalg.LinAlgError:
-                continue
-        if eigvals_S is None or not np.all(np.isfinite(eigvals_S)):
-            return 1e12
-
-        positive_eigs = eigvals_S[eigvals_S > 1e-12]
-        logdet_s = np.sum(np.log(positive_eigs)) if positive_eigs.size > 0 else 0.0
-        null_dim = np.sum(eigvals_S <= 1e-12)
-
-        lr = (
-            log_like
-            - 0.5 * penalty_term
-            + 0.5 * logdet_s
-            - 0.5 * logdet_hs
-            - 0.5 * null_dim * np.log(2 * np.pi)
-        )
-        if not np.isfinite(lr):
-            return 1e12
-        return -lr
-
-    p0 = np.zeros(num_params)
-    if K > 0:
-        p0[J + T:J + T + K] = 0.05
-        p0[J + T + K:] = 0.05
-
-    bounds = [(None, None)] * (J + T)
-    if K > 0:
-        bounds += [(0, None)] * (2 * K)
-
-    log_p0 = np.log([1.0, 1.0, 1.0]) if K > 0 else np.log([1.0, 1.0])
-    opt_penalties = minimize(
-        reml_criterion, x0=log_p0,
-        method='L-BFGS-B', bounds=[(-10, 10)] * len(log_p0)
-    )
-    if not opt_penalties.success:
-        best_p_alpha = float(np.exp(log_p0[0]))
-        best_p_delta = float(np.exp(log_p0[1]))
-        best_p_beta = float(np.exp(log_p0[2])) if K > 0 else 0.0
-    else:
-        best_p_alpha = float(np.exp(opt_penalties.x[0]))
-        best_p_delta = float(np.exp(opt_penalties.x[1]))
-        best_p_beta = float(np.exp(opt_penalties.x[2])) if K > 0 else 0.0
-
-    final_res = minimize(
-        objective_func, x0=p0,
-        args=(best_p_alpha, best_p_delta, best_p_beta),
-        method='L-BFGS-B', bounds=bounds
-    )
-    popt = final_res.x
-
-    alpha_hat = popt[:J]
-    delta_hat = popt[J:J + T]
-    eta_hat, _ = jacobian_eta(popt)
-    r_t_factual = sigmoid(eta_hat)
-    eta_cf = Bm @ alpha_hat + delta_hat
-    r_t_counterfactual = sigmoid(eta_cf)
-
-    res = {
-        "fsCFR_factual_mean": r_t_factual,
-        "fsCFR_counterfactual_mean": r_t_counterfactual,
-        "fsCFR_baseline_logit": Bm @ alpha_hat,
-        "fsCFR_delta": delta_hat,
-    }
-    if K > 0:
-        res["fsCFR_beta_abs_est"] = popt[J + T:J + T + K]
-        res["fsCFR_beta_slope_abs_est"] = popt[J + T + K:]
-    else:
-        res["fsCFR_beta_abs_est"] = np.array([])
-        res["fsCFR_beta_slope_abs_est"] = np.array([])
-    return res
+from fsCFR_python import fsCFR_model_wrapper as fsCFR_model
 
 
 def run_all_benchmarks(sim_data: Dict[str, Any]) -> Dict[str, Any]:
-    """Run all benchmark CFR estimation methods on simulated data (no CIs)."""
+    """Run all benchmark CFR estimation methods."""
     benchmark_r_t_estimates = {
         "cCFR_model": cCFR_model(sim_data["d_t"], sim_data["c_t"], cumulative=True),
         "aCFR_model": aCFR_model(sim_data["d_t"], sim_data["c_t"], sim_data["f_s_true"])
@@ -368,7 +115,8 @@ def run_all_benchmarks(sim_data: Dict[str, Any]) -> Dict[str, Any]:
         f_s=sim_data["f_s_true"],
         Bm=sim_data["Bm_true"],
         intervention_times_abs=sim_data["true_intervention_times_0_abs"],
-        intervention_signs=sim_data["beta_signs_true"]
+        intervention_signs=sim_data["beta_signs_true"],
+        verbose=False
     )
 
     all_benchmark_results = {**benchmark_r_t_estimates, **fscfr_results}
@@ -376,29 +124,28 @@ def run_all_benchmarks(sim_data: Dict[str, Any]) -> Dict[str, Any]:
 
 
 # =============================================================================
-# NUMPYRO MODEL DEFINITION (Merged from sampler.py)
+# Bayesian sCFR Model (NumPyro)
 # =============================================================================
 
 def sCFR_model(data: Dict[str, Any]):
     """
-    Optimized sCFR Model with spline main effect, i.i.d. random effect,
-    and hinge + step-function interventions.
+    Bayesian semiparametric CFR model.
+    
     Structure:
-      - Baseline: RW2 with L2 penalty (Gaussian innovations on 2nd differences).
-      - Intervention: Linear combination of indicator functions.
-      - Likelihood: Poisson.
+    - Baseline: B @ alpha with RW2 penalty
+    - Random effect: delta ~ N(0, sigma_delta), centered
+    - Intervention: Step + Hinge functions
+    - Likelihood: Poisson
     """
-    # --- 1. Unpack Data ---
-    dt = data['dt']            # Observed deaths
-    fc_mat = data['fc_mat']    # Convolution matrix Q
-    Bm = data['Bm']            # B-spline basis (T x J)
-    Z = data['Z']              # Intervention Matrix (T x K)
-    beta_signs = data.get('beta_signs', None) # Optional direction constraints
+    dt = data['dt']
+    fc_mat = data['fc_mat']
+    Bm = data['Bm']
+    Z = data['Z']
+    beta_signs = data.get('beta_signs', None)
     T = dt.shape[0]
     J = Bm.shape[1]
 
-    # --- 2. Main Effect: B @ alpha with RW2-L2 prior on alpha ---
-    # Overall shrinkage on alpha
+    # Baseline effect with RW2 penalty
     alpha = numpyro.sample("alpha", dist.Normal(0.0, 5.0).expand([J]).to_event(1))
     tau_alpha = numpyro.sample("tau_alpha", dist.Gamma(0.01, 0.01))
 
@@ -408,20 +155,23 @@ def sCFR_model(data: Dict[str, Any]):
 
     main_logit = jnp.dot(Bm, alpha)
 
-    # --- 3. Random Effect: i.i.d. with centering constraint ---
-    sigma_delta = numpyro.sample("sigma_delta", dist.HalfNormal(1.0))
-    delta_raw = numpyro.sample("delta_raw", dist.Normal(0.0, sigma_delta).expand([T]).to_event(1))
-    delta = delta_raw - jnp.mean(delta_raw)
+    # Random effect with HalfCauchy prior for shrinkage
+    sigma_delta = numpyro.sample("sigma_delta", dist.HalfCauchy(0.1))
+    
+    delta_raw = numpyro.sample("delta_raw", dist.Normal(0.0, 1.0).expand([T]).to_event(1))
+    delta_uncentered = sigma_delta * delta_raw
+    delta = delta_uncentered - jnp.mean(delta_uncentered)
     numpyro.deterministic("delta", delta)
 
-    # --- 4. Intervention Effect: Hinge + Step Functions ---
+    # Intervention effect
     intervention_logit = 0.0
     if Z.shape[1] > 0:
         if beta_signs is not None:
-            beta_abs = numpyro.sample("beta_abs", dist.HalfNormal(1.0).expand([Z.shape[1]]).to_event(1))
-            beta_slope_abs = numpyro.sample(
-                "beta_slope_abs", dist.HalfNormal(1.0).expand([Z.shape[1]]).to_event(1)
-            )
+            # LogNormal priors centered around typical effect size (~0.5)
+            beta_abs = numpyro.sample("beta_abs", 
+                dist.LogNormal(jnp.log(0.5), 0.5).expand([Z.shape[1]]).to_event(1))
+            beta_slope_abs = numpyro.sample("beta_slope_abs", 
+                dist.LogNormal(jnp.log(0.5), 0.5).expand([Z.shape[1]]).to_event(1))
             beta_step = beta_abs * beta_signs
             beta_slope = beta_slope_abs * beta_signs
         else:
@@ -432,26 +182,21 @@ def sCFR_model(data: Dict[str, Any]):
                 "beta_slope", dist.Normal(0, 1.0).expand([Z.shape[1]]).to_event(1)
             )
 
-        # Hinge basis: (t - t_k)_+ derived from step Z; scaled to [0, 1]
         denom = jnp.maximum(T - 1, 1)
         Z_hinge = (jnp.cumsum(Z, axis=0) - Z) / denom
         intervention_logit = jnp.dot(Z, beta_step) + jnp.dot(Z_hinge, beta_slope)
 
-    # --- 5. Likelihood (Poisson) ---
+    # Likelihood
     eta = main_logit + delta + intervention_logit
     r_t_val = jax.nn.sigmoid(eta)
     
-    # Convolution: Expected deaths = Q * r_t
     mu = jnp.dot(fc_mat, r_t_val)
-    mu = jnp.maximum(mu, 1e-9) # Numerical stability
+    mu = jnp.maximum(mu, 1e-9)
 
-    # Poisson Likelihood as requested
     numpyro.sample("obs_deaths", dist.Poisson(mu), obs=dt)
 
-    # --- 5. Deterministic Outputs ---
-    # Essential for analysis and plotting
+    # Deterministic outputs
     numpyro.deterministic("r_t", r_t_val)
-    # Counterfactual: Baseline only (excludes intervention_logit)
     numpyro.deterministic("r_cf", jax.nn.sigmoid(main_logit + delta))
     numpyro.deterministic("baseline_logit", main_logit)
 
@@ -464,10 +209,7 @@ def run_numpyro_sampler(
     num_chains: int = 1,
     init_params: Optional[Dict[str, Any]] = None
 ) -> MCMC:
-    """
-    Runs the NUTS sampler for the sCFR model.
-    """
-    # Kernel definition
+    """Run NUTS sampler for the sCFR model."""
     kernel = NUTS(
         sCFR_model,
         target_accept_prob=0.9,
@@ -479,16 +221,16 @@ def run_numpyro_sampler(
         num_warmup=num_warmup,
         num_samples=num_samples,
         num_chains=num_chains,
-        progress_bar=True, # Enable progress bar
+        progress_bar=True,
         chain_method='parallel' if num_chains > 1 else 'sequential'
     )
 
-    # Run MCMC
     mcmc.run(rng_key, model_data)
     return mcmc
 
+
 # =============================================================================
-# MODEL FITTING FUNCTIONS
+# Model Fitting Functions
 # =============================================================================
 
 def get_ols_initial_values(
@@ -499,11 +241,11 @@ def get_ols_initial_values(
     beta_signs: Optional[np.ndarray] = None,
     c_t: Optional[np.ndarray] = None
 ) -> Dict[str, Any]:
-    """
-    Initializes parameters to warm-start the sampler.
-    Baseline alpha is obtained by OLS: argmin ||B alpha - logit(cCFR)||^2.
-    Other parameters use simple small-value initializations aligned with sCFR_model.
-    """
+    """Initialize parameters using OLS for warm-starting the sampler."""
+    T = len(d_t)
+    J = Bm.shape[1]
+    K = Z.shape[1]
+    
     if c_t is not None:
         cCFR = cCFR_model(d_t, c_t, cumulative=True)
         cCFR = np.clip(cCFR, 1e-4, 1.0 - 1e-4)
@@ -513,11 +255,11 @@ def get_ols_initial_values(
         total_effective_cases = np.sum(Q_mat) + 1e-9
         global_r = np.clip(total_deaths / total_effective_cases, 1e-4, 0.99)
         global_logit = logit(global_r)
-        y = np.full(len(d_t), float(global_logit))
+        y = np.full(T, float(global_logit))
 
     B = np.asarray(Bm)
     b = B.T @ y
-    BtB = B.T @ B + 1e-6 * np.eye(B.shape[1])
+    BtB = B.T @ B + 1e-6 * np.eye(J)
     try:
         alpha_init = np.linalg.solve(BtB, b)
     except np.linalg.LinAlgError:
@@ -527,22 +269,22 @@ def get_ols_initial_values(
         'alpha': alpha_init,
         'tau_alpha': 1.0,
         'sigma_delta': 0.1,
-        'delta_raw': np.zeros(len(d_t))
+        'delta_raw': np.zeros(T)
     }
 
-    # 2. If interventions exist, initialize coefficients
-    if Z.shape[1] > 0:
+    if K > 0:
         if beta_signs is not None:
-            init_values['beta_abs'] = np.full(Z.shape[1], 0.05, dtype=float)
-            init_values['beta_slope_abs'] = np.full(Z.shape[1], 0.05, dtype=float)
+            init_values['beta_abs'] = np.full(K, 0.5, dtype=float)
+            init_values['beta_slope_abs'] = np.full(K, 0.5, dtype=float)
         else:
-            init_values['beta'] = np.zeros(Z.shape[1])
-            init_values['beta_slope'] = np.zeros(Z.shape[1])
+            init_values['beta'] = np.zeros(K)
+            init_values['beta_slope'] = np.zeros(K)
             
     return init_values
 
 
 def _validate_init_params(init_params: Optional[Dict[str, Any]]) -> bool:
+    """Validate initialization parameters."""
     if not init_params:
         return False
     for key in ("alpha", "delta_raw"):
@@ -565,16 +307,11 @@ def fit_proposed_model(
     sim_data: Dict[str, Any],
     jax_prng_key: jax.random.PRNGKey
 ) -> Tuple[Dict[str, np.ndarray], Any]:
-    """
-    Main entry point: Prepares data, initializes params, and fits the model.
-    Returns posterior samples and the MCMC object.
-    """
-    # 1. Prepare Data Dictionary for JAX
+    """Fit the Bayesian sCFR model and return posterior samples."""
     Z_input = sim_data["Z_input_true"]
     if sim_data["num_interventions_true_K"] == 0:
         Z_input = np.empty((sim_data["N_obs"], 0))
     
-    # Handle beta signs if present
     beta_signs_jax = None
     if sim_data["num_interventions_true_K"] > 0 and "beta_signs_true" in sim_data:
         beta_signs_jax = jnp.array(sim_data["beta_signs_true"])
@@ -587,7 +324,6 @@ def fit_proposed_model(
         'beta_signs': beta_signs_jax
     }
 
-    # 2. Get Initial Values (Warm Start)
     try:
         init_vals = get_ols_initial_values(
             sim_data["d_t"],
@@ -605,7 +341,6 @@ def fit_proposed_model(
             print("Warning: Invalid init values detected; falling back to default initialization.")
         init_vals = None
 
-    # 3. Run Sampler
     mcmc = run_numpyro_sampler(
         model_data=data_for_sampler,
         rng_key=jax_prng_key,
@@ -615,10 +350,7 @@ def fit_proposed_model(
         init_params=init_vals
     )
 
-    # 4. Extract Samples
     posterior_samples = mcmc.get_samples()
-    
-    # Convert to numpy for downstream compatibility
     posterior_samples_np = {k: np.array(v) for k, v in posterior_samples.items()}
     
     return posterior_samples_np, mcmc

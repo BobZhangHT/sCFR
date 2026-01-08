@@ -1,58 +1,81 @@
+"""
+Configuration module for sCFR simulation study.
+
+This module defines all parameters for the simulation study including:
+- Monte Carlo simulation settings
+- Data generation parameters
+- Intervention effect specifications
+- Scenario definitions
+- MCMC sampler configuration
+- Output directory structure
+"""
+
 import os
 import numpy as np
 
-# --- General Simulation Parameters ---
-NUM_MONTE_CARLO_RUNS = 5  # Number of simulation runs for each scenario
-T_ANALYSIS_LENGTH = 200    # The length of the time series used for analysis
-T_SIMULATION_BUFFER = 60   # Additional time points for simulation burn-in to avoid edge effects
-T_SERIES_LENGTH_SIM = T_ANALYSIS_LENGTH + T_SIMULATION_BUFFER # Total simulation length
-GLOBAL_BASE_SEED = 2025    # Base seed for global reproducibility
-NUM_CORES_TO_USE = 5       # Number of CPU cores for parallel processing
-OVERWRITE_EXISTING_RESULTS = True # If True, overwrite existing result files during a new run
+# =============================================================================
+# Simulation Settings
+# =============================================================================
 
-# --- Data Generation Process (DGP) Parameters ---
-# Onset-to-Death Distribution (f_s) using a Gamma distribution
-F_MEAN = 15.43             # Mean of the delay distribution
-F_SHAPE = 2.03             # Shape parameter of the delay distribution
-F_DELAY_MAX = T_ANALYSIS_LENGTH + T_SIMULATION_BUFFER # Maximum delay considered
+NUM_MONTE_CARLO_RUNS = 5
+T_ANALYSIS_LENGTH = 200
+T_SIMULATION_BUFFER = 60
+T_SERIES_LENGTH_SIM = T_ANALYSIS_LENGTH + T_SIMULATION_BUFFER
+GLOBAL_BASE_SEED = 2025
+NUM_CORES_TO_USE = 5
+OVERWRITE_EXISTING_RESULTS = True
 
-# B-spline Basis for generating the baseline CFR trend
-N_SPLINE_KNOTS_J = 10      # Number of knots for the B-spline basis
-SPLINE_ORDER = 4           # Order of the B-spline (e.g., 4 for cubic)
+# =============================================================================
+# Delay Distribution Parameters (Gamma)
+# =============================================================================
 
-# I.i.d. Random Effect (delta_t) on logit-CFR
-# NOTE: Set per-scenario via SIGMA_DELTA_SCENARIOS.
+F_MEAN = 15.43
+F_SHAPE = 2.03
+F_DELAY_MAX = T_ANALYSIS_LENGTH + T_SIMULATION_BUFFER
 
-# Confirmed Cases (c_t) Generation
-C_T_FUNCTION_TYPE = 'v_shape'      # Functional form of the case counts ('v_shape' or 'constant')
-C_T_VSHAPE_MAX_CASES = 10000       # Maximum cases at the peak for 'v_shape'
-C_T_VSHAPE_PEAK_TIME_FACTOR = 0.4  # Relative time of the peak for 'v_shape' (t_peak=0.4*T)
-C_T_VSHAPE_SLOPE = 75              # Slope of the 'v_shape' function
-C_T_CONSTANT_CASES = 500           # Number of cases for 'constant' type
-MIN_DRAWN_CASES = 20               # Minimum number of cases on any day to ensure stability
+# =============================================================================
+# B-spline Basis Parameters
+# =============================================================================
 
-# --- INTERVENTION PARAMETERS (Step + Hinge Effects) ---
+N_SPLINE_KNOTS_J = 10
+SPLINE_ORDER = 4
+
+# =============================================================================
+# Case Count Generation Parameters
+# =============================================================================
+
+C_T_FUNCTION_TYPE = 'v_shape'
+C_T_VSHAPE_MAX_CASES = 10000
+C_T_VSHAPE_PEAK_TIME_FACTOR = 0.4
+C_T_VSHAPE_SLOPE = 75
+C_T_CONSTANT_CASES = 500
+MIN_DRAWN_CASES = 20
+
+# =============================================================================
+# Intervention Effect Parameters
+# =============================================================================
+
 TRUE_BETA_STEP_ABS_K1 = [0.6]
 TRUE_BETA_SLOPE_ABS_K1 = [0.6]
 TRUE_BETA_STEP_ABS_K2 = [0.6, 0.4]
 TRUE_BETA_SLOPE_ABS_K2 = [0.6, 0.4]
-TRUE_T_K1_FACTOR = [0.5]            # Relative timing for K=1 intervention
-TRUE_T_K2_FACTOR = [0.33, 0.66]     # Relative timings for K=2 interventions
+TRUE_T_K1_FACTOR = [0.5]
+TRUE_T_K2_FACTOR = [0.33, 0.66]
 SIGNS_K1_STEP = [-1]
 SIGNS_K1_SLOPE = [-1]
 SIGNS_K2_STEP = [-1, 1]
 SIGNS_K2_SLOPE = [-1, 1]
 
-# Random effect scale per intervention setting
 SIGMA_DELTA_SCENARIOS = {
     "I0": 0.20,
     "I1": 0.00,
     "I2": 0.10
 }
 
-# --- Scenario Definitions ---
-SCENARIOS = []
-# Define different baseline CFR patterns
+# =============================================================================
+# Scenario Definitions
+# =============================================================================
+
 cfr_types_params = {
     "C1": {"name": "Constant", "params": {"cfr_const": 0.02}},
     "C2": {"name": "Linear Decr.", "params": {"cfr_start": 0.03, "cfr_end": 0.01}},
@@ -61,7 +84,6 @@ cfr_types_params = {
                                                "peak_t_factor": 0.5, "peak_w_factor": 0.2}}
 }
 
-# Define different intervention settings (number of interventions, effects, timing)
 intervention_types_params = {
     "I0": {"name": "K=0", "K": 0, "beta_step_abs": [], "beta_slope_abs": [],
            "times_factor": [], "signs_step": [], "signs_slope": []},
@@ -73,7 +95,7 @@ intervention_types_params = {
            "times_factor": TRUE_T_K2_FACTOR, "signs_step": SIGNS_K2_STEP, "signs_slope": SIGNS_K2_SLOPE}
 }
 
-# Systematically create all 12 scenarios by combining CFR patterns and intervention settings
+SCENARIOS = []
 scen_counter = 1
 for cfr_code, cfr_data in cfr_types_params.items():
     for int_code, int_data in intervention_types_params.items():
@@ -84,10 +106,8 @@ for cfr_code, cfr_data in cfr_types_params.items():
             current_cfr_params["peak_t"] = current_cfr_params["peak_t_factor"] * T_ANALYSIS_LENGTH
             current_cfr_params["peak_w"] = current_cfr_params["peak_w_factor"] * T_ANALYSIS_LENGTH
 
-        # Calculate absolute intervention times from relative factors
         current_int_times = [t_factor * T_ANALYSIS_LENGTH for t_factor in int_data["times_factor"]]
 
-        # Append the fully defined scenario to the list
         SCENARIOS.append({
             "id": scenario_id,
             "cfr_type_code": cfr_code, "cfr_type_name": cfr_data["name"],
@@ -103,12 +123,18 @@ for cfr_code, cfr_data in cfr_types_params.items():
         })
         scen_counter += 1
 
-# --- MCMC and Output Configuration ---
-NUM_WARMUP = 1000          # Number of warmup steps for MCMC sampler
-NUM_SAMPLES = 1000         # Number of posterior samples to draw in MCMC
-NUM_CHAINS = 1             # Number of MCMC chains to run
+# =============================================================================
+# MCMC Configuration
+# =============================================================================
 
-# Define base directory and subdirectories for all outputs
+NUM_WARMUP = 1000
+NUM_SAMPLES = 1000
+NUM_CHAINS = 1
+
+# =============================================================================
+# Output Directory Structure
+# =============================================================================
+
 OUTPUT_DIR_BASE = "./simulation_outputs/"
 OUTPUT_DIR_PLOTS = os.path.join(OUTPUT_DIR_BASE, "plots/")
 OUTPUT_DIR_TABLES = os.path.join(OUTPUT_DIR_BASE, "tables/")

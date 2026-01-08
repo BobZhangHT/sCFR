@@ -5,3 +5,4 @@
 *.npz
 *.pyc
 /real_data_outputs
+/fsCFR_optimizer_comparison

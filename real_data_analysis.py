@@ -1,51 +1,58 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """
-UK COVID-19 Case Fatality Rate (CFR) Analysis
+UK COVID-19 Case Fatality Rate Analysis.
 
-This script analyzes the time-varying factual and counterfactual CFR for the United Kingdom
-using the proposed Bayesian semiparametric model (sCFR) and compares it against several 
-benchmark models. This version includes both the start and end (lift) dates of major lockdowns 
-as interventions.
+This script analyzes time-varying factual and counterfactual CFR for the UK
+using the Bayesian sCFR model and benchmark methods.
 
-Based on UK_Analysis.ipynb, converted to command-line executable script.
-Outputs are saved to ./real_data_outputs/
+Usage:
+    python real_data_analysis.py          # sCFR only
+    python real_data_analysis.py --full   # Include all benchmarks
+
+Outputs saved to ./real_data_outputs/
 """
 
 import os
 import warnings
+import argparse
 import pandas as pd
 import numpy as np
 import jax
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
 
-# Import necessary functions from the provided modules
 import config
 import data_generation
 import methods
 
-# Suppress warnings
 warnings.filterwarnings("ignore", category=RuntimeWarning)
 
-# --- Create Output Directory ---
+# Parse arguments
+parser = argparse.ArgumentParser(description='UK COVID-19 CFR Analysis')
+parser.add_argument('--full', action='store_true', help='Include all benchmark models')
+args = parser.parse_args()
+
+PLOT_FULL = args.full
+
+# Output directory
 OUTPUT_DIR = "./real_data_outputs/"
-PLOT_FULL = False
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 print(f"Outputs will be saved to: {OUTPUT_DIR}")
+print(f"Full comparison mode: {PLOT_FULL}")
 
-# --- Load and Prepare UK Data ---
+# =============================================================================
+# Load and Prepare UK Data
+# =============================================================================
+
 print("Loading WHO COVID-19 data...")
 df_who = pd.read_csv("./WHO-COVID-19-global-daily-data.csv", encoding='unicode_escape')
 df_uk = df_who[df_who['Country'] == "United Kingdom of Great Britain and Northern Ireland"].copy()
 
-# Define the analysis period: 2020-03-01 to 2021-12-31
 df_uk['Date_reported'] = pd.to_datetime(df_uk['Date_reported'])
 start_date = '2020-03-01'
 end_date = '2021-12-31'
 df_period = df_uk[(df_uk['Date_reported'] >= start_date) & (df_uk['Date_reported'] <= end_date)].copy()
 
-# Extract and smooth case and death counts (7-day moving average)
 dates = df_period['Date_reported'].values
 ct_raw = np.nan_to_num(df_period['New_cases'].values)
 dt_raw = np.nan_to_num(df_period['New_deaths'].values)
@@ -56,7 +63,10 @@ dt = pd.Series(dt_raw).rolling(window=7, min_periods=1).mean().values.astype(int
 N_obs = len(ct)
 print(f"Data loaded for the period: {start_date} to {end_date} ({N_obs} days)")
 
-# --- Figure 1: Plot of Confirmed Cases and Deaths with Wave Annotations ---
+# =============================================================================
+# Plot Cases and Deaths
+# =============================================================================
+
 print("Generating cases and deaths plot...")
 fig, ax1 = plt.subplots(figsize=(12, 7))
 plt.style.use('seaborn-v0_8-paper')
@@ -72,14 +82,12 @@ ax2.plot(dates, dt, color='darkred', label='Deaths (7-day avg)', linewidth=1.5)
 ax2.set_ylabel('Deaths', color='darkred', fontsize=16)
 ax2.tick_params(axis='y', labelcolor='darkred', labelsize=14)
 
-# --- Add Wave Annotations ---
 wave_periods = {
     'Wave 1': ('2020-03-01', '2020-07-01'),
     'Wave 2 ': ('2020-09-01', '2021-05-01'),
     'Wave 3 ': ('2021-06-01', '2021-12-01')
 }
 
-y_max_ax1 = ax1.get_ylim()[1]
 for wave, (start, end) in wave_periods.items():
     ax1.axvspan(pd.to_datetime(start), pd.to_datetime(end), color='gray', alpha=0.15, zorder=0)
 
@@ -94,24 +102,26 @@ plt.savefig(os.path.join(OUTPUT_DIR, "uk_cases_and_deaths.png"), dpi=200, bbox_i
 plt.close(fig)
 print("  Saved: uk_cases_and_deaths.pdf and .png")
 
-# --- Define Intervention Times for UK Lockdowns (Start and Lift) ---
+# =============================================================================
+# Define Interventions
+# =============================================================================
+
 print("\nSetting up intervention times...")
 intervention_dates = [
-    '2020-03-23', # Lockdown 1 Start
-    '2020-06-15', # Lockdown 1 Lift
-    '2020-11-05', # Lockdown 2 Start
-    '2020-12-02', # Lockdown 2 Lift
-    '2021-01-06', # Lockdown 3 Start
-    '2021-04-12'  # Lockdown 3 Lift
+    '2020-03-23', '2020-06-15',  # Lockdown 1
+    '2020-11-05', '2020-12-02',  # Lockdown 2
+    '2021-01-06', '2021-04-12'   # Lockdown 3
 ]
 intervention_times_abs = [(pd.to_datetime(d) - pd.to_datetime(start_date)).days for d in intervention_dates]
-# Intervention signs: negative for lockdowns (start), positive for lifting restrictions
-intervention_signs = np.array([-1, 1, -1, 1, -1, 1]) 
+intervention_signs = np.array([-1, 1, -1, 1, -1, 1])
 K_interventions = len(intervention_times_abs)
 
 print(f"Interventions defined at days: {intervention_times_abs}")
 
-# --- Prepare Data Dictionary for Models ---
+# =============================================================================
+# Prepare Model Data
+# =============================================================================
+
 N_SPLINE_KNOTS_J = 20
 f_s = data_generation.generate_delay_distribution(N_obs, config.F_MEAN, config.F_SHAPE)
 Q_matrix = methods.construct_Q_matrix(ct, f_s, N_obs)
@@ -129,14 +139,16 @@ sim_data_dict = {
     "true_intervention_times_0_abs": intervention_times_abs
 }
 
-# --- Run sCFR Model ---
+# =============================================================================
+# Fit sCFR Model
+# =============================================================================
+
 print("\nFitting the proposed sCFR model...")
 jax_key = jax.random.PRNGKey(config.GLOBAL_BASE_SEED)
 posterior_samples, _ = methods.fit_proposed_model(sim_data_dict, jax_key)
 print("sCFR model fitting complete.")
 
 if PLOT_FULL:
-    # --- Run Benchmark Models ---
     print("Running benchmark models...")
     benchmark_r_t_estimates = {
         "cCFR_model": methods.cCFR_model(sim_data_dict["d_t"], sim_data_dict["c_t"], cumulative=True),
@@ -151,57 +163,50 @@ if PLOT_FULL:
     )
     benchmark_outputs = {**benchmark_r_t_estimates, **its_results}
     print("Benchmark models complete.")
-
-    # --- Figure 2: Plot of Factual and Counterfactual CFR Estimates with Improved Annotations ---
-    print("\nGenerating CFR comparison plot...")
-    fig, ax = plt.subplots(figsize=(12, 7))
-    plt.style.use('seaborn-v0_8-paper')
 else:
     benchmark_outputs = {}
     print("Skipping benchmark models (PLOT_FULL=False).")
 
-# --- Figure 2: Plot of Factual and Counterfactual CFR Estimates ---
+# =============================================================================
+# Plot CFR Estimates
+# =============================================================================
+
 print("\nGenerating CFR plot...")
 fig, ax = plt.subplots(figsize=(12, 7))
 plt.style.use('seaborn-v0_8-paper')
 
-# --- Process sCFR results ---
 r_t_key = 'r_t' if 'r_t' in posterior_samples else 'p'
 r_cf_key = 'r_cf' if 'r_cf' in posterior_samples else 'p_cf'
 p_mean = np.mean(posterior_samples[r_t_key], axis=0)
 p_lower, p_upper = np.percentile(posterior_samples[r_t_key], [2.5, 97.5], axis=0)
 p_cf_mean = np.mean(posterior_samples[r_cf_key], axis=0)
 
-# --- Plot sCFR Factual ---
-ax.plot(dates, p_mean, label='sCFR (Factual)', color='blue', linewidth=2.0, zorder=5)
-ax.fill_between(dates, p_lower, p_upper, color='blue', alpha=0.2, label='sCFR 95% CrI')
-
-# --- Plot sCFR Counterfactual ---
-ax.plot(dates, p_cf_mean, label='sCFR (Counterfactual)', color='cyan', linestyle='--', linewidth=2.0, zorder=4)
+# Plot sCFR
+ax.plot(dates, p_mean, label='sCFR (Factual)', color='tab:blue', linewidth=2.0, zorder=5)
+ax.fill_between(dates, p_lower, p_upper, color='tab:blue', alpha=0.2, label='sCFR 95% CrI')
+ax.plot(dates, p_cf_mean, label='sCFR (Counterfactual)', color='tab:cyan', linestyle='--', linewidth=2.0, zorder=4)
 
 if PLOT_FULL:
-    # --- Plot Benchmarks ---
-    ax.plot(dates, benchmark_outputs['cCFR_model'], label='cCFR', color='red', linestyle=':')
-    ax.plot(dates, benchmark_outputs['aCFR_model'], label='aCFR', color='green', linestyle='-.')
-    ax.plot(dates, benchmark_outputs['fsCFR_factual_mean'], label='fsCFR (Factual)', color='purple', linestyle='--')
-    ax.plot(dates, benchmark_outputs['fsCFR_counterfactual_mean'], label='fsCFR (Counterfactual)', color='brown', linestyle='--')
+    ax.plot(dates, benchmark_outputs['cCFR_model'], label='cCFR', color='tab:green', linestyle=':', linewidth=2.0)
+    ax.plot(dates, benchmark_outputs['aCFR_model'], label='aCFR', color='tab:red', linestyle='-.', linewidth=2.0)
+    ax.plot(dates, benchmark_outputs['fsCFR_factual_mean'], label='fsCFR (Factual)', color='tab:orange', linestyle='--', linewidth=2.0)
+    ax.plot(dates, benchmark_outputs['fsCFR_counterfactual_mean'], label='fsCFR (Counterfactual)', color='tab:brown', linestyle=':', linewidth=2.0)
 
-# --- Add Intervention Lines and Annotations (Improved Logic) ---
+# Add intervention annotations
 intervention_labels = [
     'Lockdown 1 Start', 'Lockdown 1 Lift',
     'Lockdown 2 Start', 'Lockdown 2 Lift',
     'Lockdown 3 Start', 'Lockdown 3 Lift'
 ]
 
-# Stagger annotation heights to prevent overlap
 y_max = ax.get_ylim()[1]
 annotation_y_levels = [y_max * 0.85, y_max * 0.7, y_max * 0.55]
-text_y_offsets = [-25, 25, -25, 25, -25, 25] # Alternate text position
+text_y_offsets = [-25, 25, -25, 25, -25, 25]
 
 for i, t_int in enumerate(intervention_times_abs):
     date = dates[t_int]
     label = intervention_labels[i]
-    y_level = annotation_y_levels[i // 2] + 0.05 # Use the same height for each start/lift pair
+    y_level = annotation_y_levels[i // 2] + 0.05
     y_offset = text_y_offsets[i]
     
     ax.axvline(x=date, color='black', linestyle='--', alpha=0.7)
@@ -228,7 +233,10 @@ plt.savefig(os.path.join(OUTPUT_DIR, f"{plot_suffix}.png"), dpi=200, bbox_inches
 plt.close(fig)
 print(f"  Saved: {plot_suffix}.pdf and .png")
 
-# --- Save Results to CSV ---
+# =============================================================================
+# Save Results
+# =============================================================================
+
 print("\nSaving results to CSV...")
 results_df = pd.DataFrame({
     'date': dates,
@@ -250,5 +258,3 @@ print("  Saved: uk_cfr_results.csv")
 print(f"\n{'='*80}")
 print("Analysis complete! All outputs saved to:", OUTPUT_DIR)
 print(f"{'='*80}")
-
-
