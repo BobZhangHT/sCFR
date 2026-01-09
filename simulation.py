@@ -503,10 +503,12 @@ def main():
     
     if args.demo:
         n_runs = 5
-        print(">>> Run mode: DEMO (5 repetitions per scenario)")
+        n_jobs = 5
+        print(">>> Run mode: DEMO (5 repetitions per scenario, 5 cores)")
     else:
         n_runs = config.NUM_MONTE_CARLO_RUNS
-        print(f">>> Run mode: FULL ({n_runs} repetitions per scenario)")
+        n_jobs = args.jobs
+        print(f">>> Run mode: FULL ({n_runs} repetitions per scenario, {n_jobs} cores)")
     
     if args.reset:
         confirm = input(f"!!! WARNING !!! You are about to delete all data under {config.OUTPUT_DIR_BASE}.\nPlease enter 'yes' to confirm: ")
@@ -534,9 +536,9 @@ def main():
         total_tasks = len(tasks)
         print(f"[System] Total tasks: {total_tasks} (Scenarios: {len(config.SCENARIOS)} x Repetitions: {n_runs})")
         
-        print(f"[System] Starting parallel simulation (Cores: {args.jobs})...")
+        print(f"[System] Starting parallel simulation (Cores: {n_jobs})...")
         
-        results = Parallel(n_jobs=args.jobs, backend='loky')(
+        results = Parallel(n_jobs=n_jobs, backend='loky')(
             delayed(run_single_simulation_task)(scen, idx, seed)
             for scen, idx, seed in tqdm(tasks, desc="Simulation Progress", unit="run")
         )

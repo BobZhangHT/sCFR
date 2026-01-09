@@ -423,7 +423,7 @@ def plot_combined_metrics_summary(results_df: pd.DataFrame, output_dir: str) -> 
         width = 0.18 if len(metric_cols) > 2 else 0.25
         for idx in range(len(scenario_ids)):
             if idx % 2 == 1:
-                ax.axvspan(idx - 0.5, idx + 0.5, color="#f0f0f0", alpha=0.6, zorder=0)
+                ax.axvspan(idx - 0.5, idx + 0.5, color="#d9d9d9", alpha=0.7, zorder=0)
         for idx, (col, label, color, offset) in enumerate(zip(metric_cols, labels, colors, offsets)):
             data = [
                 results_df.loc[results_df["scenario_id"] == scen, col].dropna().values

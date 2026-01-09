@@ -6,3 +6,10 @@
 *.pyc
 /real_data_outputs
 /fsCFR_optimizer_comparison
+/.kiro
+/.vscode
+/.idea
+*.swp
+*.swo
+*~
+.DS_Store

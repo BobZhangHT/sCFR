@@ -17,12 +17,12 @@ import numpy as np
 # Simulation Settings
 # =============================================================================
 
-NUM_MONTE_CARLO_RUNS = 5
+NUM_MONTE_CARLO_RUNS = 1000
 T_ANALYSIS_LENGTH = 200
 T_SIMULATION_BUFFER = 60
 T_SERIES_LENGTH_SIM = T_ANALYSIS_LENGTH + T_SIMULATION_BUFFER
 GLOBAL_BASE_SEED = 2025
-NUM_CORES_TO_USE = 5
+NUM_CORES_TO_USE = -1  # -1 means use all available cores
 OVERWRITE_EXISTING_RESULTS = True
 
 # =============================================================================
