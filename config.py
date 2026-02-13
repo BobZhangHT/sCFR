@@ -25,6 +25,17 @@ GLOBAL_BASE_SEED = 2025
 NUM_CORES_TO_USE = -1  # -1 means use all available cores
 OVERWRITE_EXISTING_RESULTS = True
 
+# Storage optimization settings
+# If False, posterior samples are not saved (only summaries are saved)
+# This can significantly reduce disk usage (from ~30GB+ to ~1GB)
+# Note: All analysis and plotting functions use posterior_summaries (JSON files),
+#       so saving raw samples is optional for most use cases
+SAVE_RAW_POSTERIOR_SAMPLES = False
+# If SAVE_RAW_POSTERIOR_SAMPLES is True, this controls whether to save only key parameters
+# Key parameters: beta_abs, beta_slope_abs, sigma_delta, tau_alpha, lambda
+# Excludes time series (r_t, r_cf, baseline_logit, delta) to save space
+SAVE_ONLY_KEY_PARAMETERS = True
+
 # =============================================================================
 # Delay Distribution Parameters (Gamma)
 # =============================================================================

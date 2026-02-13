@@ -255,6 +255,134 @@ if PLOT_FULL:
 results_df.to_csv(os.path.join(OUTPUT_DIR, "uk_cfr_results.csv"), index=False)
 print("  Saved: uk_cfr_results.csv")
 
+# =============================================================================
+# Beta Estimates Table (sCFR and fsCFR)
+# =============================================================================
+
+def _fmt_num(x, ndec=3):
+    """Format number for display; None/NaN -> '---'."""
+    if x is None or (isinstance(x, float) and np.isnan(x)):
+        return "---"
+    return f"{float(x):.{ndec}f}"
+
+def _fmt_interval(mean, lo, hi, ndec=3):
+    """Format mean [lo, hi] for CrI."""
+    return f"{mean:.{ndec}f} [{lo:.{ndec}f}, {hi:.{ndec}f}]"
+
+intervention_labels = [
+    'Lockdown 1 Start', 'Lockdown 1 Lift',
+    'Lockdown 2 Start', 'Lockdown 2 Lift',
+    'Lockdown 3 Start', 'Lockdown 3 Lift'
+]
+
+# sCFR: posterior mean and 95% CrI for beta_abs (step) and beta_slope_abs (slope)
+K = K_interventions
+beta_rows = []
+if K > 0 and "beta_abs" in posterior_samples and "beta_slope_abs" in posterior_samples:
+    beta_abs = np.asarray(posterior_samples["beta_abs"])   # (n_samples, K)
+    beta_slope_abs = np.asarray(posterior_samples["beta_slope_abs"])  # (n_samples, K)
+    if beta_abs.ndim == 1:
+        beta_abs = np.expand_dims(beta_abs, 0)
+    if beta_slope_abs.ndim == 1:
+        beta_slope_abs = np.expand_dims(beta_slope_abs, 0)
+    n_k = min(K, beta_abs.shape[1], beta_slope_abs.shape[1])
+    for k in range(n_k):
+        row = {
+            "intervention": intervention_labels[k] if k < len(intervention_labels) else f"Intervention {k+1}",
+            "scfr_step_mean": np.mean(beta_abs[:, k]),
+            "scfr_step_lower": np.percentile(beta_abs[:, k], 2.5),
+            "scfr_step_upper": np.percentile(beta_abs[:, k], 97.5),
+            "scfr_slope_mean": np.mean(beta_slope_abs[:, k]),
+            "scfr_slope_lower": np.percentile(beta_slope_abs[:, k], 2.5),
+            "scfr_slope_upper": np.percentile(beta_slope_abs[:, k], 97.5),
+        }
+        if PLOT_FULL and benchmark_outputs:
+            est_step = benchmark_outputs.get("fsCFR_beta_abs_est")
+            est_slope = benchmark_outputs.get("fsCFR_beta_slope_abs_est")
+            row["fscfr_step"] = float(est_step[k]) if est_step is not None and k < len(est_step) else np.nan
+            row["fscfr_slope"] = float(est_slope[k]) if est_slope is not None and k < len(est_slope) else np.nan
+        else:
+            row["fscfr_step"] = np.nan
+            row["fscfr_slope"] = np.nan
+        beta_rows.append(row)
+else:
+    for k in range(K):
+        beta_rows.append({
+            "intervention": intervention_labels[k] if k < len(intervention_labels) else f"Intervention {k+1}",
+            "scfr_step_mean": np.nan, "scfr_step_lower": np.nan, "scfr_step_upper": np.nan,
+            "scfr_slope_mean": np.nan, "scfr_slope_lower": np.nan, "scfr_slope_upper": np.nan,
+            "fscfr_step": np.nan, "fscfr_slope": np.nan,
+        })
+
+beta_df = pd.DataFrame(beta_rows)
+beta_csv_path = os.path.join(OUTPUT_DIR, "beta_estimates.csv")
+beta_df.to_csv(beta_csv_path, index=False)
+print("  Saved: beta_estimates.csv")
+
+# LaTeX three-line table for Overleaf
+def _tex_escape(s):
+    return s.replace("_", "\\_").replace("&", "\\&").replace("%", "\\%")
+
+def _tex_num(x, ndec=3):
+    if x is None or (isinstance(x, float) and np.isnan(x)):
+        return "---"
+    return f"{float(x):.{ndec}f}"
+
+def _extract_phase_and_intervention(interv_str):
+    """Extract phase number and intervention type from string like 'Lockdown 1 Start'."""
+    parts = interv_str.split()
+    if len(parts) >= 3 and parts[0] == "Lockdown":
+        phase = parts[1]
+        interv_type = " ".join(parts[2:])
+        sign = "(-1)" if "Start" in interv_type else "(+1)"
+        interv_short = "Start" + sign if "Start" in interv_type else "Lift" + sign
+        return phase, interv_short
+    return "?", interv_str
+
+# Preamble comment for Overleaf: add \usepackage{booktabs} to your document preamble if not already present.
+tex_lines = [
+    "% Requires \\usepackage{booktabs} in your LaTeX preamble.",
+    "\\begin{table}[htbp]",
+    "\\centering",
+    "\\caption{Estimated intervention effect magnitudes (absolute value) for the UK COVID-19 analysis. "
+    "We provide both posterior mean and 95\\% credible interval for sCFR, and only point estimate for fsCFR. "
+    "We denote the absolute value of immediate level change as $\\beta_{\\mathrm{abs}}^{(L)}$ while the gradual slope change as $\\beta_{\\mathrm{abs}}^{(S)}$.}",
+    "\\label{tab:uk_beta_estimates}",
+    "\\begin{tabular}{lclccc}",
+    "\\toprule",
+    "Lockdown Phase & Intervention & \\multicolumn{2}{c}{$\\beta_{\\mathrm{abs}}^{(L)}$} & \\multicolumn{2}{c}{$\\beta_{\\mathrm{abs}}^{(S)}$} \\\\",
+    "\\cmidrule(lr){3-4} \\cmidrule(lr){5-6}",
+    "& & sCFR (95\\% CrI) & fsCFR & sCFR (95\\% CrI) & fsCFR \\\\",
+    "\\midrule",
+]
+for _, r in beta_df.iterrows():
+    def _fmt_cri(mean, lo, hi):
+        if pd.isna(mean) or pd.isna(lo) or pd.isna(hi):
+            return "---"
+        return _fmt_interval(float(mean), float(lo), float(hi))
+    scfr_step_str = _fmt_cri(r["scfr_step_mean"], r["scfr_step_lower"], r["scfr_step_upper"])
+    scfr_slope_str = _fmt_cri(r["scfr_slope_mean"], r["scfr_slope_lower"], r["scfr_slope_upper"])
+    fscfr_s = _tex_num(r.get("fscfr_step"))
+    fscfr_sl = _tex_num(r.get("fscfr_slope"))
+    interv = str(r["intervention"])
+    phase, interv_short = _extract_phase_and_intervention(interv)
+    # Only show phase number on first row of each phase group
+    if interv.endswith("Start"):
+        phase_display = phase
+    else:
+        phase_display = ""
+    tex_lines.append(f"{phase_display} & {interv_short} & {scfr_step_str} & {fscfr_s} & {scfr_slope_str} & {fscfr_sl} \\\\")
+tex_lines.extend([
+    "\\bottomrule",
+    "\\end{tabular}",
+    "\\end{table}",
+])
+tex_content = "\n".join(tex_lines)
+tex_path = os.path.join(OUTPUT_DIR, "beta_estimates.tex")
+with open(tex_path, "w", encoding="utf-8") as f:
+    f.write(tex_content)
+print("  Saved: beta_estimates.tex (ready for Overleaf)")
+
 print(f"\n{'='*80}")
 print("Analysis complete! All outputs saved to:", OUTPUT_DIR)
 print(f"{'='*80}")

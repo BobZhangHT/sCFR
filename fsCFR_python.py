@@ -25,7 +25,7 @@ from tqdm import tqdm
 # Numba-accelerated Core Functions
 # =============================================================================
 
-@jit(nopython=True, cache=True)
+@jit(nopython=True, cache=False)
 def _compute_eta_and_r(alpha, delta, int_eff, B):
     """Compute eta = B @ alpha + delta + int_eff, then r = sigmoid(eta)."""
     T = B.shape[0]
@@ -46,7 +46,7 @@ def _compute_eta_and_r(alpha, delta, int_eff, B):
     return eta, r
 
 
-@jit(nopython=True, cache=True)
+@jit(nopython=True, cache=False)
 def _compute_mu(Q, r):
     """Compute mu = Q @ r (convolution)."""
     T = Q.shape[0]
@@ -59,7 +59,7 @@ def _compute_mu(Q, r):
     return mu
 
 
-@jit(nopython=True, cache=True)
+@jit(nopython=True, cache=False)
 def _poisson_log_lik(d_t, mu):
     """Poisson log-likelihood: sum(d*log(mu) - mu)."""
     ll = 0.0
@@ -69,7 +69,7 @@ def _poisson_log_lik(d_t, mu):
     return ll
 
 
-@jit(nopython=True, cache=True)
+@jit(nopython=True, cache=False)
 def _compute_intervention_effect(t_k, beta_step, beta_slope, T):
     """Compute intervention effect: step + hinge functions."""
     int_eff = np.zeros(T)
@@ -89,13 +89,13 @@ def _compute_intervention_effect(t_k, beta_step, beta_slope, T):
     return int_eff
 
 
-@jit(nopython=True, cache=True)
+@jit(nopython=True, cache=False)
 def _center_delta(delta_raw):
     """Center delta: delta = delta_raw - mean(delta_raw)."""
     return delta_raw - np.mean(delta_raw)
 
 
-@jit(nopython=True, cache=True)
+@jit(nopython=True, cache=False)
 def _compute_nll_fixed_sigma(alpha, delta_raw, gamma, sigma_delta, tau_alpha,
                               d_t, Q, B, t_k, beta_sign, K, J, T):
     """Compute negative log-likelihood with fixed sigma_delta."""

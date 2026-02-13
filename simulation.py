@@ -129,8 +129,23 @@ def save_results(scenario_id, run_idx, posterior_samples, benchmarks, metrics, e
     with open(metrics_file, 'w') as f:
         json.dump(serializable_metrics, f, indent=4)
     
-    post_file = os.path.join(config.OUTPUT_DIR_POSTERIOR_SAMPLES, f"{scenario_id}_run_{run_idx}_posterior.npz")
-    np.savez_compressed(post_file, **posterior_samples)
+    # Save posterior samples based on configuration
+    if config.SAVE_RAW_POSTERIOR_SAMPLES:
+        post_file = os.path.join(config.OUTPUT_DIR_POSTERIOR_SAMPLES, f"{scenario_id}_run_{run_idx}_posterior.npz")
+        if config.SAVE_ONLY_KEY_PARAMETERS:
+            # Only save key parameters, exclude time series to save space
+            # Key parameters: beta_abs, beta_slope_abs, sigma_delta, tau_alpha, lambda
+            key_params = {}
+            key_param_names = ['beta_abs', 'beta_slope_abs', 'sigma_delta', 'tau_alpha', 'lambda']
+            for param_name in key_param_names:
+                if param_name in posterior_samples:
+                    key_params[param_name] = posterior_samples[param_name]
+            if key_params:
+                np.savez_compressed(post_file, **key_params)
+        else:
+            # Save all posterior samples
+            np.savez_compressed(post_file, **posterior_samples)
+    # If SAVE_RAW_POSTERIOR_SAMPLES is False, skip saving (summaries are already saved)
     
     bench_file = os.path.join(config.OUTPUT_DIR_BENCHMARK_RESULTS, f"{scenario_id}_run_{run_idx}_benchmarks.npz")
     bench_arrays = {k: v for k, v in benchmarks.items() if isinstance(v, np.ndarray)}
@@ -236,6 +251,8 @@ def prepare_aggregated_plot_data(results_df_all):
             "true_r_t": sim_data_true["true_r_0_t"][:T_analyze],
             "true_rcf_0_t": sim_data_true["true_rcf_0_t"][:T_analyze],
             "true_intervention_times_0_abs": sim_data_true["true_intervention_times_0_abs"],
+            "true_zeta_0_t": sim_data_true["true_zeta_0_t"][:T_analyze],
+            "true_eta_0_t": sim_data_true["true_eta_0_t"][:T_analyze],
             "estimated_r_t_dict": {
                 "sCFR": {k.replace('sCFR_', ''): safe_mean_and_slice(series_data[k], T_analyze) for k in series_data if 'sCFR' in k},
                 "cCFR_model": {k.replace('cCFR_', ''): safe_mean_and_slice(series_data[k], T_analyze) for k in series_data if 'cCFR' in k},
@@ -318,7 +335,9 @@ def run_analysis():
     
     cover_cols = [col for col in results_df_valid.columns if 'cover' in col]
     for col in cover_cols: 
-        results_df_valid[col] = results_df_valid[col].astype('Int64')
+        # Convert to float first, then round and convert to Int64 to avoid unsafe cast error
+        # This handles float values like 0.0, 1.0 that need to be converted to integers
+        results_df_valid[col] = pd.to_numeric(results_df_valid[col], errors='coerce').round().astype('Int64')
     
     summary_mean = results_df_valid.groupby("scenario_id").mean(numeric_only=True).add_suffix('_mean').reset_index().rename(columns={'scenario_id_mean':'scenario_id'})
     summary_std = results_df_valid.groupby("scenario_id").std(numeric_only=True).add_suffix('_std').reset_index().rename(columns={'scenario_id_std':'scenario_id'})
@@ -394,7 +413,12 @@ def run_single_simulation_task(scenario, run_idx, seed):
     posterior_file = os.path.join(config.OUTPUT_DIR_POSTERIOR_SAMPLES, f"{scenario_id}_run_{run_idx}_posterior.npz")
     benchmark_file = os.path.join(config.OUTPUT_DIR_BENCHMARK_RESULTS, f"{scenario_id}_run_{run_idx}_benchmarks.npz")
     
-    if all(os.path.exists(f) for f in [metrics_file, posterior_file, benchmark_file]):
+    # Check required files for skipping (posterior_file only if saving is enabled)
+    required_files = [metrics_file, benchmark_file]
+    if config.SAVE_RAW_POSTERIOR_SAMPLES:
+        required_files.append(posterior_file)
+    
+    if all(os.path.exists(f) for f in required_files):
         try:
             with open(metrics_file, 'r') as f:
                 metrics_data = json.load(f)

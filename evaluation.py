@@ -224,54 +224,67 @@ def plot_aggregated_factual_summary(aggregated_plot_data: list, output_dir: str)
             continue
         ax = axes[cfr_codes.index(cfr_code), int_codes.index(int_code)]
         true_r_t = plot_dict["true_r_t"]
+        true_zeta_t = plot_dict.get("true_zeta_0_t", None)
+        true_eta_t = plot_dict.get("true_eta_0_t", None)
         intervention_times = plot_dict.get("true_intervention_times_0_abs", np.array([]))
         estimated_r_t_dict = plot_dict["estimated_r_t_dict"]
-        T = len(true_r_t)
+        
+        # Compute smooth True line without random effect
+        # true_r_t = sigmoid(zeta + intervention + eta)
+        # We want: sigmoid(zeta + intervention) = sigmoid(logit(true_r_t) - eta)
+        if true_zeta_t is not None and true_eta_t is not None:
+            true_r_t_smooth = sigmoid(logit(np.clip(true_r_t, 1e-6, 1-1e-6)) - true_eta_t)
+        else:
+            # Fallback: if true_zeta_0_t or true_eta_0_t not available, use true_r_t (will still have random effect)
+            true_r_t_smooth = true_r_t
+        
+        T = len(true_r_t_smooth)
         t_array = np.arange(T)
         
-        ax.plot(t_array, true_r_t, color='black', linewidth=2.5, label='True', alpha=0.55)
+        ax.plot(t_array, true_r_t_smooth, color='black', linewidth=3.5, label='True', alpha=0.7)
         
         if "sCFR" in estimated_r_t_dict:
             sCFR_data = estimated_r_t_dict["sCFR"]
             if "mean" in sCFR_data and len(sCFR_data["mean"]) == T:
-                ax.plot(t_array, sCFR_data["mean"], color=METHOD_COLORS["sCFR"], linewidth=2.5, label='sCFR', alpha=0.85)
+                ax.plot(t_array, sCFR_data["mean"], color=METHOD_COLORS["sCFR"], linewidth=3.5, label='sCFR', alpha=0.9)
                 if "lower" in sCFR_data and "upper" in sCFR_data and len(sCFR_data["lower"]) == T and len(sCFR_data["upper"]) == T:
                     ax.fill_between(t_array, sCFR_data["lower"], sCFR_data["upper"], color=METHOD_COLORS["sCFR"], alpha=0.2)
         
         if "cCFR_model" in estimated_r_t_dict:
             cCFR_data = estimated_r_t_dict["cCFR_model"]
             if "mean" in cCFR_data and len(cCFR_data["mean"]) == T:
-                ax.plot(t_array, cCFR_data["mean"], linestyle='--', color=METHOD_COLORS["cCFR"], linewidth=2.0, label='cCFR', alpha=0.75)
+                ax.plot(t_array, cCFR_data["mean"], linestyle='--', color=METHOD_COLORS["cCFR"], linewidth=3.0, label='cCFR', alpha=0.85)
         
         if "aCFR_model" in estimated_r_t_dict:
             aCFR_data = estimated_r_t_dict["aCFR_model"]
             if "mean" in aCFR_data and len(aCFR_data["mean"]) == T:
-                ax.plot(t_array, aCFR_data["mean"], linestyle='--', color=METHOD_COLORS["aCFR"], linewidth=2.0, label='aCFR', alpha=0.75)
+                ax.plot(t_array, aCFR_data["mean"], linestyle='--', color=METHOD_COLORS["aCFR"], linewidth=3.0, label='aCFR', alpha=0.85)
         
         if "fsCFR_model" in estimated_r_t_dict:
             its_data = estimated_r_t_dict["fsCFR_model"]
             if "factual_mean" in its_data and len(its_data["factual_mean"]) == T:
-                ax.plot(t_array, its_data["factual_mean"], linestyle='--', color=METHOD_COLORS["fsCFR"], linewidth=2.6, label='fsCFR', alpha=0.95)
+                ax.plot(t_array, its_data["factual_mean"], linestyle='--', color=METHOD_COLORS["fsCFR"], linewidth=3.5, label='fsCFR', alpha=0.95)
         
         for t_int in intervention_times:
             if 0 <= t_int < T:
-                ax.axvline(x=t_int, color='black', linestyle='--', linewidth=1.6, alpha=0.85)
+                ax.axvline(x=t_int, color='black', linestyle='--', linewidth=2.0, alpha=0.85)
         
-        ax.set_title(f'{scenario_id}', fontsize=14)
-        ax.set_xlabel('Time', fontsize=12)
-        ax.set_ylabel('CFR', fontsize=12)
+        ax.set_title(f'{scenario_id}', fontsize=18, fontweight='bold')
+        ax.set_xlabel('Time', fontsize=16, fontweight='bold')
+        ax.set_ylabel('CFR', fontsize=16, fontweight='bold')
+        ax.tick_params(axis='both', which='major', labelsize=14, width=1.5)
         if cfr_codes.index(cfr_code) == 0 and int_codes.index(int_code) == 0:
-            ax.legend(loc='best', fontsize=10)
+            ax.legend(loc='best', fontsize=13, frameon=True, framealpha=0.9)
         else:
             ax.legend().remove()
-        ax.grid(True, alpha=0.3)
+        ax.grid(True, alpha=0.3, linewidth=1.0)
 
     for row_idx, cfr_code in enumerate(cfr_codes):
         row_label = config.cfr_types_params[cfr_code]["name"]
-        axes[row_idx, 0].set_ylabel(f"{row_label}\nCFR", fontsize=12)
+        axes[row_idx, 0].set_ylabel(f"{row_label}\nCFR", fontsize=16, fontweight='bold')
     for col_idx, int_code in enumerate(int_codes):
         col_label = config.intervention_types_params[int_code]["name"]
-        axes[0, col_idx].set_title(f"{col_label}", fontsize=12)
+        axes[0, col_idx].set_title(f"{col_label}", fontsize=16, fontweight='bold')
     
     plt.tight_layout()
     output_path = os.path.join(output_dir, "aggregated_factual_summary.png")
@@ -306,44 +319,61 @@ def plot_aggregated_counterfactual_summary(aggregated_plot_data: list, output_di
             continue
         ax = axes[cfr_codes.index(cfr_code), int_codes.index(int_code)]
         true_rcf_t = plot_dict["true_rcf_0_t"]
+        true_zeta_t = plot_dict.get("true_zeta_0_t", None)
+        true_eta_t = plot_dict.get("true_eta_0_t", None)
         intervention_times = plot_dict.get("true_intervention_times_0_abs", np.array([]))
         estimated_r_t_dict = plot_dict["estimated_r_t_dict"]
-        T = len(true_rcf_t)
+        
+        # Compute smooth True CF line without random effect
+        # true_rcf_t = sigmoid(zeta + eta)
+        # We want: sigmoid(zeta) = sigmoid(logit(true_rcf_t) - eta)
+        if true_zeta_t is not None:
+            # true_zeta_t is already on logit scale, so just apply sigmoid
+            true_rcf_t_smooth = sigmoid(true_zeta_t)
+        elif true_eta_t is not None:
+            # Fallback: remove random effect from true_rcf_t
+            true_rcf_t_smooth = sigmoid(logit(np.clip(true_rcf_t, 1e-6, 1-1e-6)) - true_eta_t)
+        else:
+            # Last resort: use true_rcf_t directly (will still have random effect)
+            true_rcf_t_smooth = true_rcf_t
+        
+        T = len(true_rcf_t_smooth)
         t_array = np.arange(T)
         
-        ax.plot(t_array, true_rcf_t, color='black', linewidth=2.5, label='True CF', alpha=0.55)
+        ax.plot(t_array, true_rcf_t_smooth, color='black', linewidth=3.5, label='True CF', alpha=0.7)
         
         if "sCFR" in estimated_r_t_dict and "cf_mean" in estimated_r_t_dict["sCFR"]:
             sCFR_cf = estimated_r_t_dict["sCFR"]
             if "cf_mean" in sCFR_cf and len(sCFR_cf["cf_mean"]) == T:
-                ax.plot(t_array, sCFR_cf["cf_mean"], color=METHOD_COLORS["sCFR"], linewidth=2.5, label='sCFR CF', alpha=0.85)
+                ax.plot(t_array, sCFR_cf["cf_mean"], color=METHOD_COLORS["sCFR"], linewidth=3.5, label='sCFR CF', alpha=0.9)
                 if "cf_lower" in sCFR_cf and "cf_upper" in sCFR_cf and len(sCFR_cf["cf_lower"]) == T and len(sCFR_cf["cf_upper"]) == T:
                     ax.fill_between(t_array, sCFR_cf["cf_lower"], sCFR_cf["cf_upper"], color=METHOD_COLORS["sCFR"], alpha=0.2)
         
         if "fsCFR_model" in estimated_r_t_dict:
             its_cf = estimated_r_t_dict["fsCFR_model"]
             if "cf_mean" in its_cf and len(its_cf["cf_mean"]) == T:
-                ax.plot(t_array, its_cf["cf_mean"], linestyle='--', color=METHOD_COLORS["fsCFR"], linewidth=2.6, label='fsCFR CF', alpha=0.95)
+                ax.plot(t_array, its_cf["cf_mean"], linestyle='--', color=METHOD_COLORS["fsCFR"], linewidth=3.5, label='fsCFR CF', alpha=0.95)
         
         for t_int in intervention_times:
             if 0 <= t_int < T:
-                ax.axvline(x=t_int, color='black', linestyle='--', linewidth=1.6, alpha=0.85)
+                ax.axvline(x=t_int, color='black', linestyle='--', linewidth=2.0, alpha=0.85)
         
-        ax.set_title(f'{scenario_id}', fontsize=14)
-        ax.set_xlabel('Time', fontsize=12)
-        ax.set_ylabel('CFR', fontsize=12)
+        ax.set_title(f'{scenario_id}', fontsize=18, fontweight='bold')
+        ax.set_xlabel('Time', fontsize=16, fontweight='bold')
+        ax.set_ylabel('CFR', fontsize=16, fontweight='bold')
+        ax.tick_params(axis='both', which='major', labelsize=14, width=1.5)
         if cfr_codes.index(cfr_code) == 0 and int_codes.index(int_code) == 0:
-            ax.legend(loc='best', fontsize=10)
+            ax.legend(loc='best', fontsize=13, frameon=True, framealpha=0.9)
         else:
             ax.legend().remove()
-        ax.grid(True, alpha=0.3)
+        ax.grid(True, alpha=0.3, linewidth=1.0)
 
     for row_idx, cfr_code in enumerate(cfr_codes):
         row_label = config.cfr_types_params[cfr_code]["name"]
-        axes[row_idx, 0].set_ylabel(f"{row_label}\nCFR", fontsize=12)
+        axes[row_idx, 0].set_ylabel(f"{row_label}\nCFR", fontsize=16, fontweight='bold')
     for col_idx, int_code in enumerate(int_codes):
         col_label = config.intervention_types_params[int_code]["name"]
-        axes[0, col_idx].set_title(f"{col_label}", fontsize=12)
+        axes[0, col_idx].set_title(f"{col_label}", fontsize=16, fontweight='bold')
     
     plt.tight_layout()
     output_path = os.path.join(output_dir, "aggregated_counterfactual_summary.png")
@@ -413,12 +443,14 @@ def plot_combined_metrics_summary(results_df: pd.DataFrame, output_dir: str) -> 
     beta_summary.to_csv(beta_csv_path, index=False)
 
     fig = plt.figure(figsize=(18, 10))
-    gs = fig.add_gridspec(2, 3, height_ratios=[2, 1], hspace=0.4, wspace=0.25)
+    # Increase bottom margin and adjust spacing for rotated x-axis labels in bottom subplots
+    gs = fig.add_gridspec(2, 3, height_ratios=[2, 1], hspace=0.5, wspace=0.25, 
+                          bottom=0.12, top=0.95, left=0.08, right=0.98)
 
     scenario_ids = [s["id"] for s in config.SCENARIOS]
     x_base = np.arange(len(scenario_ids))
 
-    def grouped_boxplot(ax, metric_cols, labels, colors, ylabel, title):
+    def grouped_boxplot(ax, metric_cols, labels, colors, ylabel, title, rotate_xticks=False):
         offsets = np.linspace(-0.3, 0.3, len(metric_cols))
         width = 0.18 if len(metric_cols) > 2 else 0.25
         for idx in range(len(scenario_ids)):
@@ -438,11 +470,19 @@ def plot_combined_metrics_summary(results_df: pd.DataFrame, output_dir: str) -> 
             for element in ["whiskers", "caps", "medians"]:
                 for line in bp[element]:
                     line.set_color(color)
+                    line.set_linewidth(1.5)
         ax.set_xticks(x_base)
-        ax.set_xticklabels(scenario_ids, rotation=0)
-        ax.set_ylabel(ylabel)
-        ax.set_title(title)
-        ax.grid(True, alpha=0.3, axis="y")
+        if rotate_xticks:
+            # Rotate labels for bottom subplots to avoid overlap
+            ax.set_xticklabels(scenario_ids, rotation=45, ha='right', fontsize=12, fontweight='bold')
+            # Adjust bottom margin to accommodate rotated labels
+            ax.tick_params(axis='x', which='major', pad=8)
+        else:
+            ax.set_xticklabels(scenario_ids, rotation=0, fontsize=14, fontweight='bold')
+        ax.set_ylabel(ylabel, fontsize=16, fontweight='bold')
+        ax.set_title(title, fontsize=18, fontweight='bold')
+        ax.tick_params(axis='y', which='major', labelsize=14, width=1.5)
+        ax.grid(True, alpha=0.3, axis="y", linewidth=1.0)
         ax.set_xlim(-0.7, len(scenario_ids) - 0.3)
 
     ax_main = fig.add_subplot(gs[0, :])
@@ -457,7 +497,7 @@ def plot_combined_metrics_summary(results_df: pd.DataFrame, output_dir: str) -> 
     ax_main.legend(
         handles=[plt.Line2D([0], [0], color=METHOD_COLORS[m], lw=6) for m in ["sCFR", "cCFR", "aCFR", "fsCFR"]],
         labels=["sCFR", "cCFR", "aCFR", "fsCFR"],
-        loc="upper right", fontsize=10, frameon=False
+        loc="upper right", fontsize=14, frameon=True, framealpha=0.9
     )
 
     ax_cf = fig.add_subplot(gs[1, 0])
@@ -467,7 +507,8 @@ def plot_combined_metrics_summary(results_df: pd.DataFrame, output_dir: str) -> 
         labels=["sCFR", "fsCFR"],
         colors=[METHOD_COLORS["sCFR"], METHOD_COLORS["fsCFR"]],
         ylabel=r"Logit MAE ($r_{CF}$)",
-        title="Counterfactual CFR MAE"
+        title="Counterfactual CFR MAE",
+        rotate_xticks=True
     )
 
     ax_base = fig.add_subplot(gs[1, 1])
@@ -477,7 +518,8 @@ def plot_combined_metrics_summary(results_df: pd.DataFrame, output_dir: str) -> 
         labels=["sCFR", "fsCFR"],
         colors=[METHOD_COLORS["sCFR"], METHOD_COLORS["fsCFR"]],
         ylabel="MAE (Baseline Logit)",
-        title="Baseline Effect MAE"
+        title="Baseline Effect MAE",
+        rotate_xticks=True
     )
 
     ax_rand = fig.add_subplot(gs[1, 2])
@@ -487,7 +529,8 @@ def plot_combined_metrics_summary(results_df: pd.DataFrame, output_dir: str) -> 
         labels=["sCFR", "fsCFR"],
         colors=[METHOD_COLORS["sCFR"], METHOD_COLORS["fsCFR"]],
         ylabel="MAE (Random Effect)",
-        title="Random Effect MAE"
+        title="Random Effect MAE",
+        rotate_xticks=True
     )
 
     output_path = os.path.join(output_dir, "combined_metrics_summary.png")
@@ -561,6 +604,8 @@ class ScenarioEvaluationResult:
     intervention_times: np.ndarray
     model_results: Dict[str, ModelEvaluationResult] = field(default_factory=dict)
     plot_data: Dict[str, Any] = field(default_factory=dict)
+    true_zeta_0_t: Optional[np.ndarray] = None
+    true_eta_0_t: Optional[np.ndarray] = None
 
 
 @dataclass
@@ -633,7 +678,9 @@ class CFREvaluatorVisualizer:
                 run_seed=run_seed,
                 true_factual_cfr=true_r_t,
                 true_counterfactual_cfr=true_rcf_t,
-                intervention_times=intervention_times
+                intervention_times=intervention_times,
+                true_zeta_0_t=sim_data.get("true_zeta_0_t", np.array([]))[:T_analyze],
+                true_eta_0_t=sim_data.get("true_eta_0_t", np.array([]))[:T_analyze]
             )
             
             if posterior_scfr:
@@ -809,7 +856,9 @@ class CFREvaluatorVisualizer:
             "true_r_t": result.true_factual_cfr,
             "true_rcf_0_t": result.true_counterfactual_cfr,
             "true_intervention_times_0_abs": result.intervention_times,
-            "estimated_r_t_dict": {}
+            "estimated_r_t_dict": {},
+            "true_zeta_0_t": result.true_zeta_0_t,
+            "true_eta_0_t": result.true_eta_0_t
         }
         
         if "sCFR" in result.model_results:
