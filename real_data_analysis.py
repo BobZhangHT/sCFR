@@ -348,9 +348,10 @@ tex_lines = [
     "We provide both posterior mean and 95\\% credible interval for sCFR, and only point estimate for fsCFR. "
     "We denote the absolute value of immediate level change as $\\beta_{\\mathrm{abs}}^{(L)}$ while the gradual slope change as $\\beta_{\\mathrm{abs}}^{(S)}$.}",
     "\\label{tab:uk_beta_estimates}",
-    "\\begin{tabular}{lclccc}",
+    "\\resizebox{\\textwidth}{!}{%",
+    "\\begin{tabular}{clcccc}",
     "\\toprule",
-    "Lockdown Phase & Intervention & \\multicolumn{2}{c}{$\\beta_{\\mathrm{abs}}^{(L)}$} & \\multicolumn{2}{c}{$\\beta_{\\mathrm{abs}}^{(S)}$} \\\\",
+    "\\shortstack{Lockdown\\\\Phase} & Intervention & \\multicolumn{2}{c}{$\\beta_{\\mathrm{abs}}^{(L)}$} & \\multicolumn{2}{c}{$\\beta_{\\mathrm{abs}}^{(S)}$} \\\\",
     "\\cmidrule(lr){3-4} \\cmidrule(lr){5-6}",
     "& & sCFR (95\\% CrI) & fsCFR & sCFR (95\\% CrI) & fsCFR \\\\",
     "\\midrule",
@@ -374,7 +375,8 @@ for _, r in beta_df.iterrows():
     tex_lines.append(f"{phase_display} & {interv_short} & {scfr_step_str} & {fscfr_s} & {scfr_slope_str} & {fscfr_sl} \\\\")
 tex_lines.extend([
     "\\bottomrule",
-    "\\end{tabular}",
+    "\\end{tabular}%",
+    "}",
     "\\end{table}",
 ])
 tex_content = "\n".join(tex_lines)

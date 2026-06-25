@@ -224,3 +224,97 @@ def simulate_scenario_data(scenario_config_dict, run_seed):
         "true_beta_slope_signs_0": true_beta_slope_signs_0,
         "run_seed": run_seed
     }
+
+
+def simulate_misspecified_data(seed, kind, base_id="S08", sigma_u=0.10,
+                               ar_rho=0.7, sat_lambda=20.0, nb_size=10.0,
+                               delay_mult=1.5):
+    """Generate data under a misspecified data-generating process that departs from
+    the sCFR estimator assumptions along ONE axis (R2-6). The estimator always fits
+    its standard form (i.i.d. centered u, instantaneous level+hinge intervention,
+    Poisson deaths, the standard onset-to-death delay), so each ``kind`` stresses a
+    different assumption while the fit is held fixed.
+
+    kind:
+      'well'       reference: i.i.d. u, hinge intervention, Poisson, correct delay
+      'ar1'        AR(1) day-level effects (u_t = rho u_{t-1} + eps), breaks i.i.d.
+      'saturating' gradual exponential intervention onset, not level+slope hinge
+      'negbin'     overdispersed (negative-binomial) deaths, not Poisson
+      'delay'      data generated with a longer onset-to-death delay than the fit
+
+    The returned dict matches the keys used by the standard fitting helpers; the fit
+    consumes the STANDARD f_s/Q, so 'delay' is misspecified by construction.
+    """
+    base_cfg = next(s for s in config.SCENARIOS if s["id"] == base_id)
+    base = simulate_scenario_data(base_cfg, seed)
+    rng = np.random.default_rng(seed + 777)
+    T = len(base["d_t"])
+    t = np.arange(T)
+
+    zeta = base["true_zeta_0_t"]                       # baseline logit-CFR
+    Z_step = base["Z_input_true"]; Z_hinge = base["Z_hinge_true"]
+    bL = np.asarray(base["true_beta_0"], float)        # signed level
+    bS = np.asarray(base["true_beta_slope_0"], float)  # signed slope
+    interv = Z_step @ bL + Z_hinge @ bS                # standard hinge effect
+    t0 = int(np.asarray(base_cfg["true_intervention_times_0"]).astype(int)[0])
+
+    # (1) random-effect process
+    if kind == "ar1":
+        u = np.zeros(T)
+        eps = rng.normal(0.0, sigma_u * np.sqrt(1.0 - ar_rho ** 2), T)
+        for i in range(1, T):
+            u[i] = ar_rho * u[i - 1] + eps[i]
+    else:
+        u = rng.normal(0.0, sigma_u, T)
+    u = u - u.mean()
+
+    # (2) intervention shape
+    if kind == "saturating":
+        b0_signed = float(bL[0] + bS[0])               # matched asymptotic logit shift
+        interv = b0_signed * (1.0 - np.exp(-np.maximum(t - t0, 0) / sat_lambda))
+
+    # (3) delay used for DATA generation (fit still uses the standard delay/Q)
+    c_t = base["c_t"]
+    if kind == "delay":
+        f_data = generate_delay_distribution(config.F_DELAY_MAX,
+                                             config.F_MEAN * delay_mult, config.F_SHAPE)
+        Q_data = construct_Q_matrix(c_t, f_data, T)
+    else:
+        Q_data = base["Q_true"]
+
+    true_logit_F = zeta + interv + u
+    true_logit_CF = zeta + u
+    true_r = sigmoid(true_logit_F)
+    true_rcf = sigmoid(true_logit_CF)
+
+    # (4) death law
+    mu = np.maximum(1e-9, Q_data @ true_r)
+    if kind == "negbin":
+        p = nb_size / (nb_size + mu)                   # mean mu, var mu + mu^2/nb_size
+        d_t = rng.negative_binomial(nb_size, p)
+    else:
+        d_t = rng.poisson(mu)
+
+    return {
+        "scenario_id": kind,
+        "c_t": c_t,
+        "d_t": d_t,
+        "f_s_true": base["f_s_true"],                  # STANDARD delay for the fit
+        "Q_true": base["Q_true"],                      # STANDARD Q for the fit
+        "Bm_true": base["Bm_true"],
+        "Z_input_true": Z_step,
+        "Z_hinge_true": Z_hinge,
+        "beta_signs_true": base["beta_signs_true"],
+        "num_interventions_true_K": 1,
+        "true_beta_abs_0": base["true_beta_abs_0"],
+        "true_beta_slope_abs_0": base["true_beta_slope_abs_0"],
+        "true_intervention_times_0_abs": [t0],
+        "true_r_0_t": true_r,
+        "true_rcf_0_t": true_rcf,
+        "true_logit_F": true_logit_F,
+        "true_logit_CF": true_logit_CF,
+        # systematic (smooth) factual/counterfactual logit-CFR, excluding the realized
+        # day-level effect u; this is the target the paper evaluates and plots
+        "true_smooth_logit_F": zeta + interv,
+        "true_smooth_logit_CF": zeta,
+    }

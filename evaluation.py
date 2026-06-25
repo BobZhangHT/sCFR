@@ -110,8 +110,92 @@ def calculate_param_cri_coverage(
     upper_value: Union[float, np.ndarray]
 ) -> bool:
     """Check if true value is within credible interval."""
-    return bool((np.mean(true_value) >= np.mean(lower_value)) and 
+    return bool((np.mean(true_value) >= np.mean(lower_value)) and
                 (np.mean(true_value) <= np.mean(upper_value)))
+
+
+# -----------------------------------------------------------------------------
+# NEW METRICS — added for revision (R1-6)
+# -----------------------------------------------------------------------------
+
+def calculate_effectiveness(
+    r_F: np.ndarray,
+    r_CF: np.ndarray,
+    eps: float = 1e-9
+) -> np.ndarray:
+    """Point-wise proportional CFR reduction due to interventions.
+
+    Eff_t = 1 - r_{F,t} / r_{CF,t}
+
+    Positive values indicate the interventions reduced the CFR relative
+    to the counterfactual at time t.
+
+    Parameters
+    ----------
+    r_F : np.ndarray, shape (T,)
+        Factual CFR estimates (posterior mean or point estimate).
+    r_CF : np.ndarray, shape (T,)
+        Counterfactual CFR estimates (same type as r_F).
+    eps : float
+        Small constant to prevent division by zero.
+
+    Returns
+    -------
+    np.ndarray, shape (T,)
+        Time-series of proportional CFR reduction.
+    """
+    return 1.0 - r_F / np.maximum(r_CF, eps)
+
+
+def summarise_effectiveness_per_phase(
+    r_F: np.ndarray,
+    r_CF: np.ndarray,
+    phase_intervals: List[Tuple[int, int]],
+    r_F_samples: Optional[np.ndarray] = None,
+    r_CF_samples: Optional[np.ndarray] = None,
+    ci_level: float = 0.95,
+) -> List[Dict[str, Any]]:
+    """Average effectiveness per lockdown phase; optionally compute CrI.
+
+    Parameters
+    ----------
+    r_F : np.ndarray, shape (T,)
+        Factual CFR (posterior mean or point estimate).
+    r_CF : np.ndarray, shape (T,)
+        Counterfactual CFR (posterior mean or point estimate).
+    phase_intervals : list of (start, end) tuples
+        Each tuple is the inclusive day indices of a lockdown phase.
+    r_F_samples : np.ndarray, shape (S, T), optional
+        Posterior samples of factual CFR for credible intervals.
+    r_CF_samples : np.ndarray, shape (S, T), optional
+        Posterior samples of counterfactual CFR.
+    ci_level : float
+        Credible interval probability mass, default 0.95.
+
+    Returns
+    -------
+    list of dict with keys: phase, eff_mean, eff_lo, eff_hi
+    """
+    alpha = (1 - ci_level) / 2
+    results = []
+    for k, (t0, t1) in enumerate(phase_intervals):
+        t0 = max(t0, 0)
+        t1 = min(t1, len(r_F) - 1)
+        eff_pt = float(np.mean(calculate_effectiveness(r_F[t0:t1+1], r_CF[t0:t1+1])))
+
+        if r_F_samples is not None and r_CF_samples is not None:
+            # S × phase_length effectiveness
+            eff_samples = 1.0 - r_F_samples[:, t0:t1+1] / np.maximum(
+                r_CF_samples[:, t0:t1+1], 1e-9
+            )  # (S, phase_len)
+            eff_phase_samples = eff_samples.mean(axis=1)  # (S,)
+            eff_lo = float(np.percentile(eff_phase_samples, 100 * alpha))
+            eff_hi = float(np.percentile(eff_phase_samples, 100 * (1 - alpha)))
+        else:
+            eff_lo = eff_hi = float("nan")
+
+        results.append(dict(phase=k + 1, eff_mean=eff_pt, eff_lo=eff_lo, eff_hi=eff_hi))
+    return results
 
 
 # =============================================================================
@@ -381,6 +465,114 @@ def plot_aggregated_counterfactual_summary(aggregated_plot_data: list, output_di
     output_path_pdf = os.path.join(output_dir, "aggregated_counterfactual_summary.pdf")
     plt.savefig(output_path_pdf, bbox_inches='tight')
     plt.close()
+
+
+def plot_effectiveness_summary(aggregated_plot_data: list, output_dir: str) -> None:
+    """Effectiveness (proportional CFR reduction) summary across all scenarios.
+
+    For each scenario the panel shows the time-varying effectiveness
+    Eff_t = 1 - r_F,t / r_CF,t for the truth, sCFR, and fsCFR, so the reader
+    can see whether both estimators recover the true intervention effect (and
+    do not manufacture an effect when none is present, i.e. the K=0 column).
+    A per-scenario summary CSV (time-averaged effectiveness over the
+    post-intervention window) is written alongside the figure.
+    """
+    os.makedirs(output_dir, exist_ok=True)
+
+    def _eff(rF, rCF):
+        rF = np.clip(np.asarray(rF, float), 1e-9, 1.0)
+        rCF = np.clip(np.asarray(rCF, float), 1e-9, None)
+        return 1.0 - rF / rCF
+
+    cfr_codes = list(config.cfr_types_params.keys())
+    int_codes = list(config.intervention_types_params.keys())
+    scenario_meta = {s["id"]: s for s in config.SCENARIOS}
+
+    fig, axes = plt.subplots(len(cfr_codes), len(int_codes),
+                             figsize=(6 * len(int_codes), 4.8 * len(cfr_codes)))
+    if len(cfr_codes) == 1 and len(int_codes) == 1:
+        axes = np.array([[axes]])
+    elif len(cfr_codes) == 1:
+        axes = axes[np.newaxis, :]
+    elif len(int_codes) == 1:
+        axes = axes[:, np.newaxis]
+
+    summary_rows = []
+    for plot_dict in aggregated_plot_data:
+        scenario_id = plot_dict["scenario_id"]
+        meta = scenario_meta.get(scenario_id, {})
+        cfr_code = meta.get("cfr_type_code")
+        int_code = meta.get("intervention_type_code")
+        if cfr_code not in cfr_codes or int_code not in int_codes:
+            continue
+        ax = axes[cfr_codes.index(cfr_code), int_codes.index(int_code)]
+
+        true_rF = np.asarray(plot_dict["true_r_t"], float)
+        true_rCF = np.asarray(plot_dict["true_rcf_0_t"], float)
+        T = len(true_rF)
+        t_array = np.arange(T)
+        est = plot_dict["estimated_r_t_dict"]
+
+        eff_true = _eff(true_rF, true_rCF)
+        ax.plot(t_array, eff_true, color='black', linewidth=3.0, label='True', alpha=0.7)
+
+        eff_scfr = None
+        if "sCFR" in est and "mean" in est["sCFR"] and "cf_mean" in est["sCFR"]:
+            sF, sCF = est["sCFR"]["mean"], est["sCFR"]["cf_mean"]
+            if len(sF) == T and len(sCF) == T:
+                eff_scfr = _eff(sF, sCF)
+                ax.plot(t_array, eff_scfr, color=METHOD_COLORS["sCFR"], linewidth=3.0, label='sCFR', alpha=0.9)
+                lo, hi = est["sCFR"].get("cf_lower"), est["sCFR"].get("cf_upper")
+                if lo is not None and hi is not None and len(lo) == T and len(hi) == T:
+                    ax.fill_between(t_array, _eff(sF, hi), _eff(sF, lo),
+                                    color=METHOD_COLORS["sCFR"], alpha=0.18)
+
+        eff_fscfr = None
+        if "fsCFR_model" in est and "factual_mean" in est["fsCFR_model"] and "cf_mean" in est["fsCFR_model"]:
+            fF, fCF = est["fsCFR_model"]["factual_mean"], est["fsCFR_model"]["cf_mean"]
+            if len(fF) == T and len(fCF) == T:
+                eff_fscfr = _eff(fF, fCF)
+                ax.plot(t_array, eff_fscfr, linestyle='--', color=METHOD_COLORS["fsCFR"], linewidth=3.0, label='fsCFR', alpha=0.95)
+
+        int_times = plot_dict.get("true_intervention_times_0_abs", np.array([]))
+        for t_int in int_times:
+            if 0 <= t_int < T:
+                ax.axvline(x=t_int, color='black', linestyle=':', linewidth=1.8, alpha=0.7)
+
+        ax.axhline(y=0.0, color='gray', linewidth=1.0, alpha=0.6)
+        ax.set_title(f'{scenario_id}', fontsize=18, fontweight='bold')
+        ax.set_xlabel('Time', fontsize=16, fontweight='bold')
+        ax.set_ylabel('Effectiveness', fontsize=16, fontweight='bold')
+        ax.tick_params(axis='both', which='major', labelsize=14, width=1.5)
+        if cfr_codes.index(cfr_code) == 0 and int_codes.index(int_code) == 0:
+            ax.legend(loc='best', fontsize=13, frameon=True, framealpha=0.9)
+        ax.grid(True, alpha=0.3, linewidth=1.0)
+
+        # time-averaged effectiveness over the post-first-intervention window
+        if len(int_times) > 0:
+            t0 = int(min(int_times)); t0 = max(0, min(t0, T - 1)); win = slice(t0, T)
+        else:
+            win = slice(0, T)
+        def _avg(e):
+            return float(np.mean(e[win])) if e is not None else float('nan')
+        summary_rows.append(dict(
+            scenario=scenario_id, K=meta.get("num_interventions_K_true", 0),
+            eff_true=_avg(eff_true), eff_sCFR=_avg(eff_scfr), eff_fsCFR=_avg(eff_fscfr)))
+
+    for row_idx, cfr_code in enumerate(cfr_codes):
+        row_label = config.cfr_types_params[cfr_code]["name"]
+        axes[row_idx, 0].set_ylabel(f"{row_label}\nEffectiveness", fontsize=16, fontweight='bold')
+    for col_idx, int_code in enumerate(int_codes):
+        col_label = config.intervention_types_params[int_code]["name"]
+        axes[0, col_idx].set_title(f"{col_label}", fontsize=16, fontweight='bold')
+
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, "effectiveness_summary.png"), dpi=300, bbox_inches='tight')
+    plt.savefig(os.path.join(output_dir, "effectiveness_summary.pdf"), bbox_inches='tight')
+    plt.close()
+
+    pd.DataFrame(summary_rows).to_csv(
+        os.path.join(output_dir, "effectiveness_summary.csv"), index=False)
 
 
 def plot_metric_summary_boxplots(results_df: pd.DataFrame, output_dir: str) -> None:

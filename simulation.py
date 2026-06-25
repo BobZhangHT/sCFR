@@ -1,16 +1,42 @@
 """
 Simulation runner for sCFR study.
 
-This script provides:
-- Monte Carlo simulation with checkpoint support
-- Automatic analysis and visualization
-- Parallel execution using joblib
+Modes
+-----
+--simulate [--demo|--full] [--reset]
+    Monte Carlo simulation over all 12 scenarios.
+    demo : 5 reps/scenario, 5 parallel workers (local quick-check)
+    full : config.NUM_MONTE_CARLO_RUNS (500) reps/scenario, all cores
 
-Usage:
-    python simulation.py --simulate --demo    # Quick test (5 runs)
-    python simulation.py --simulate --full    # Full simulation
-    python simulation.py --analyze            # Analysis only
-    python simulation.py --simulate --reset   # Clear and restart
+--analyze
+    Re-run analysis/plotting on existing simulation_outputs/.
+
+--runtime [--demo]
+    Section 3.5 timing/scalability experiment (sequential NUTS fits).
+    Grid: T in {100,200,400,800,1200}, K in {1,2,4,8}.
+    demo : 10 reps/setting;  full : 100 reps/setting.
+
+--knot [--demo]
+    R2-2 knot-sensitivity experiment on scenario S09 (sinusoidal, K=2).
+    J grid: {5,10,15,20,30}.
+    demo : 10 reps;  full : config.NUM_MONTE_CARLO_RUNS (500) reps.
+
+--prior [--demo]
+    R2-3 prior-sensitivity experiment on scenario S09.
+    13 prior configurations (scale + family, one-at-a-time).
+    demo : 10 reps;  full : 500 reps.
+
+--misspec [--demo]
+    R2-6 misspecified-DGP experiment (5 data-generating processes).
+    demo : 10 reps;  full : 500 reps.
+
+Server full-scale commands (run from repo root, set BLAS to single-thread):
+    OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 \\
+        python simulation.py --simulate --full
+    python simulation.py --runtime
+    python simulation.py --knot
+    python simulation.py --prior
+    python simulation.py --misspec
 """
 
 import argparse
@@ -25,11 +51,16 @@ import pandas as pd
 from joblib import Parallel, delayed
 from tqdm import tqdm
 import jax
+import jax.numpy as jnp
+import numpyro
+import numpyro.distributions as dist
+from numpyro.infer import MCMC, NUTS
 
 import config
 import methods
 import data_generation
 import evaluation as ev
+from fsCFR_python import fsCFR_model_wrapper
 
 
 # =============================================================================
@@ -361,6 +392,7 @@ def run_analysis():
     plot_functions = [
         ("Generating aggregated factual summary plot...", ev.plot_aggregated_factual_summary, "plot_aggregated_factual_summary"),
         ("Generating aggregated counterfactual summary plot...", ev.plot_aggregated_counterfactual_summary, "plot_aggregated_counterfactual_summary"),
+        ("Generating effectiveness summary plot...", ev.plot_effectiveness_summary, "plot_effectiveness_summary"),
         ("Generating summary boxplots...", ev.plot_metric_summary_boxplots, "plot_metric_summary_boxplots"),
         ("Generating combined metrics summary...", ev.plot_combined_metrics_summary, "plot_combined_metrics_summary"),
     ]
@@ -368,7 +400,7 @@ def run_analysis():
     for msg, func, step_name in plot_functions:
         try:
             print(msg)
-            if "aggregated" in step_name:
+            if "aggregated" in step_name or "effectiveness" in step_name:
                 func(aggregated_plot_data, config.OUTPUT_DIR_PLOTS)
             else:
                 func(results_df_valid, config.OUTPUT_DIR_PLOTS)
@@ -399,6 +431,755 @@ def run_analysis():
             json.dump(analysis_summary, f, indent=2)
     except Exception as e:
         print(f"[Warning] Failed to save analysis summary: {e}")
+
+
+# =============================================================================
+# Computational Experiment (Section 3.5: cost, scalability, online updating)
+# =============================================================================
+#
+# This is a TIMING experiment, so the timed fits run SEQUENTIALLY: executing
+# fits concurrently would make them contend for CPU cores and corrupt the
+# wall-clock latency we are trying to measure. The experiment is still
+# one-click, shows a progress bar, and is fully checkpointed/resumable (one
+# cache file per replicate). Compilation cost is removed by a single throwaway
+# fit per (T, K) setting plus median/IQR aggregation, which is robust to any
+# stray compile-inflated replicate. Replicate seeds vary, so each replicate is
+# a distinct data realization (Plan A).
+
+RUNTIME_CACHE_DIR = os.path.join(config.OUTPUT_DIR_TABLES, "runtime_cache")
+RUNTIME_T_FOR_K = 200          # series length held fixed while K is varied
+RUNTIME_T_GRID_FULL = [100, 200, 400, 800, 1200]
+RUNTIME_K_GRID_FULL = [1, 2, 4, 8]
+RUNTIME_T_GRID_DEMO = [100, 200, 400, 800, 1200]   # same grid as full; demo differs only in replications
+RUNTIME_K_GRID_DEMO = [1, 2, 4, 8]
+
+
+def _runtime_reps_for_T(T, demo=False):
+    """Replicate datasets per setting: 10 in demo, 100 at full scale (run on the server)."""
+    return 10 if demo else 100
+
+
+def _runtime_build_data(T, K, seed):
+    """Build one synthetic dataset and the model design objects at length T,
+    with K interventions. Seed-varying so replicates are distinct realizations.
+    """
+    T_sim = T + config.T_SIMULATION_BUFFER
+    rng = np.random.default_rng(seed)
+
+    c_t_full = np.maximum(
+        config.C_T_VSHAPE_MAX_CASES
+        - config.C_T_VSHAPE_SLOPE * np.abs(np.arange(T_sim) - config.C_T_VSHAPE_PEAK_TIME_FACTOR * T),
+        config.MIN_DRAWN_CASES,
+    ).astype(float)
+
+    f_s = data_generation.generate_delay_distribution(T_sim, config.F_MEAN, config.F_SHAPE)
+    Q_full = data_generation.construct_Q_matrix(c_t_full, f_s, T_sim)
+    Bm_full = data_generation.generate_bspline_basis(T_sim, config.N_SPLINE_KNOTS_J, config.SPLINE_ORDER)
+    zeta_full = data_generation.generate_baseline_cfr_zeta(T_sim, T, "C1", {"cfr_const": 0.02})
+
+    if K > 0:
+        int_times = np.linspace(0.2 * T, 0.8 * T, K)
+        Z_full = data_generation.generate_intervention_input_matrix(
+            np.arange(T_sim, dtype=float), int_times, K)
+    else:
+        int_times = np.array([], dtype=float)
+        Z_full = np.empty((T_sim, 0))
+
+    r0_full = 1.0 / (1.0 + np.exp(-zeta_full))
+    mu0 = np.maximum(Q_full @ r0_full, 1e-9)
+    d_t_full = rng.poisson(mu0)
+
+    return dict(
+        d_t=d_t_full[:T], c_t=c_t_full[:T], Q=Q_full[:T, :T],
+        Bm=Bm_full[:T, :], Z=Z_full[:T, :], f_s=f_s[:T],
+        int_times=int_times, T=T, K=K,
+        beta_signs=(np.array([-1.0] * K) if K > 0 else None),
+    )
+
+
+def _runtime_time_scfr(data, warmup, samples, seed):
+    """Time a single sCFR NUTS fit (seconds)."""
+    model_data = dict(
+        dt=jnp.array(data["d_t"].astype(float)),
+        fc_mat=jnp.array(data["Q"].astype(float)),
+        Bm=jnp.array(data["Bm"].astype(float)),
+        Z=jnp.array(data["Z"].astype(float)),
+        beta_signs=(jnp.array(data["beta_signs"]) if data["beta_signs"] is not None else None),
+    )
+    K = data["K"]
+    init_vals = methods.get_ols_initial_values(
+        data["d_t"], data["Q"], data["Z"], data["Bm"],
+        beta_signs=(None if K == 0 else np.ones(K)), c_t=data["c_t"])
+    if not methods._validate_init_params(init_vals):
+        init_vals = None
+    t0 = time.perf_counter()
+    methods.run_numpyro_sampler(
+        model_data=model_data, rng_key=jax.random.PRNGKey(seed),
+        num_warmup=warmup, num_samples=samples, num_chains=1, init_params=init_vals)
+    return time.perf_counter() - t0
+
+
+def _runtime_time_fscfr(data):
+    """Time a single fsCFR (EM + L-BFGS-B) fit (seconds)."""
+    K = data["K"]
+    int_times = list(data["int_times"].astype(int)) if K > 0 else []
+    signs = ([-1] * K) if K > 0 else []
+    t0 = time.perf_counter()
+    fsCFR_model_wrapper(
+        d_t=data["d_t"], c_t=data["c_t"], f_s=data["f_s"], Bm=data["Bm"],
+        intervention_times_abs=int_times, intervention_signs=signs, verbose=False)
+    return time.perf_counter() - t0
+
+
+def run_runtime_experiment(demo=False, warmup=None, samples=None):
+    """Run the Section 3.5 computational experiment (sequential timing, cached)."""
+    os.makedirs(RUNTIME_CACHE_DIR, exist_ok=True)
+    warmup = warmup if warmup is not None else config.NUM_WARMUP
+    samples = samples if samples is not None else config.NUM_SAMPLES
+    T_grid = RUNTIME_T_GRID_DEMO if demo else RUNTIME_T_GRID_FULL
+    K_grid = RUNTIME_K_GRID_DEMO if demo else RUNTIME_K_GRID_FULL
+
+    # (kind, T, K): scale_T sweeps T at K=1; scale_K sweeps K at T=RUNTIME_T_FOR_K.
+    settings = [("scale_T", T, 1) for T in T_grid]
+    settings += [("scale_K", RUNTIME_T_FOR_K, K) for K in K_grid if K != 1]
+
+    tasks = []
+    for kind, T, K in settings:
+        for rep in range(_runtime_reps_for_T(T, demo)):
+            tasks.append((kind, T, K, rep))
+
+    print(f"[Runtime] {len(tasks)} timed fits "
+          f"(NUTS {warmup}+{samples}); sequential for valid wall-clock timing.")
+
+    warmed = set()  # (T, K) already JIT-compiled in this process
+    for kind, T, K, rep in tqdm(tasks, desc="Runtime experiment", unit="fit"):
+        cache = os.path.join(RUNTIME_CACHE_DIR, f"{kind}_T{T}_K{K}_rep{rep}.json")
+        if os.path.exists(cache):
+            warmed.add((T, K))
+            continue
+        seed = 1_000_000 + T * 1000 + K * 100 + rep
+        data = _runtime_build_data(T, K, seed)
+        if (T, K) not in warmed:
+            # one throwaway fit per setting to absorb JIT compilation
+            try:
+                _runtime_time_scfr(data, min(warmup, 50), min(samples, 50), seed)
+                _runtime_time_fscfr(data)
+            except Exception as e:
+                print(f"[Runtime] warmup ({T},{K}) failed: {e}")
+            warmed.add((T, K))
+        try:
+            scfr_t = _runtime_time_scfr(data, warmup, samples, seed)
+            fscfr_t = _runtime_time_fscfr(data)
+        except Exception as e:
+            print(f"[Runtime] fit ({kind},T={T},K={K},rep={rep}) failed: {e}")
+            continue
+        with open(cache, 'w') as fh:
+            json.dump(dict(kind=kind, T=T, K=K, rep=rep,
+                           scfr_time=scfr_t, fscfr_time=fscfr_t), fh)
+
+    aggregate_and_plot_runtime(demo=demo)
+
+
+def _runtime_load_cache():
+    """Load all cached replicate timings into a DataFrame."""
+    rows = []
+    if not os.path.isdir(RUNTIME_CACHE_DIR):
+        return pd.DataFrame(rows)
+    for fn in os.listdir(RUNTIME_CACHE_DIR):
+        if fn.endswith(".json"):
+            try:
+                with open(os.path.join(RUNTIME_CACHE_DIR, fn)) as fh:
+                    rows.append(json.load(fh))
+            except Exception:
+                pass
+    return pd.DataFrame(rows)
+
+
+def aggregate_and_plot_runtime(demo=False):
+    """Aggregate cached timings (median, IQR) and draw the two-panel figure."""
+    df = _runtime_load_cache()
+    if df.empty:
+        print("[Runtime] no cached timings found; run with --runtime first.")
+        return
+
+    def agg(sub):
+        out = {}
+        for m in ("scfr_time", "fscfr_time"):
+            v = sub[m].to_numpy(dtype=float)
+            out[m + "_med"] = float(np.median(v))
+            out[m + "_lo"] = float(np.percentile(v, 25))
+            out[m + "_hi"] = float(np.percentile(v, 75))
+        out["n"] = len(sub)
+        return out
+
+    # Panel A: scale in T (K=1). Panel B: scale in K (T fixed); K=1 reused from A.
+    A = (df[df["kind"] == "scale_T"].groupby("T").apply(agg, include_groups=False).to_dict())
+    A_T = sorted(A.keys())
+    base_K1 = df[(df["kind"] == "scale_T") & (df["T"] == RUNTIME_T_FOR_K)]
+    dfK = df[df["kind"] == "scale_K"].copy()
+    if not base_K1.empty:
+        b = base_K1.copy(); b["kind"] = "scale_K"; b["K"] = 1
+        dfK = pd.concat([dfK, b], ignore_index=True)
+    B = (dfK.groupby("K").apply(agg, include_groups=False).to_dict())
+    B_K = sorted(B.keys())
+
+    # write a small summary CSV (transparency; not a paper table)
+    summ = []
+    for T in A_T:
+        a = A[T]
+        summ.append(dict(panel="T", T=T, K=1, n=a["n"],
+                         scfr_med=a["scfr_time_med"], fscfr_med=a["fscfr_time_med"]))
+    for K in B_K:
+        b = B[K]
+        summ.append(dict(panel="K", T=RUNTIME_T_FOR_K, K=K, n=b["n"],
+                         scfr_med=b["scfr_time_med"], fscfr_med=b["fscfr_time_med"]))
+    os.makedirs(config.OUTPUT_DIR_TABLES, exist_ok=True)
+    pd.DataFrame(summ).to_csv(
+        os.path.join(config.OUTPUT_DIR_TABLES, "runtime_summary.csv"), index=False)
+
+    _plot_runtime_figure(A, A_T, B, B_K)
+
+
+def _plot_runtime_figure(A, A_T, B, B_K):
+    """Two-panel runtime figure styled to match the other simulation figures."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    c_s = ev.METHOD_COLORS["sCFR"]
+    c_f = ev.METHOD_COLORS["fsCFR"]
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5.5))
+
+    def err(meds, los, his):
+        meds = np.array(meds); los = np.array(los); his = np.array(his)
+        return meds, np.vstack([meds - los, his - meds])
+
+    # Panel A: time vs T (K=1)
+    sm, se = err([A[t]["scfr_time_med"] for t in A_T],
+                 [A[t]["scfr_time_lo"] for t in A_T],
+                 [A[t]["scfr_time_hi"] for t in A_T])
+    fm, fe = err([A[t]["fscfr_time_med"] for t in A_T],
+                 [A[t]["fscfr_time_lo"] for t in A_T],
+                 [A[t]["fscfr_time_hi"] for t in A_T])
+    ax = axes[0]
+    ax.errorbar(A_T, sm, yerr=se, fmt="o-", color=c_s, capsize=4, lw=2, label="sCFR")
+    ax.errorbar(A_T, fm, yerr=fe, fmt="s-", color=c_f, capsize=4, lw=2, label="fsCFR")
+    ax.set_xlabel("Series length $T$ (days)", fontsize=16, fontweight="bold")
+    ax.set_ylabel("Time per fit (s)", fontsize=16, fontweight="bold")
+    ax.set_title("(A) Varying $T$ (at $K=1$)", fontsize=18, fontweight="bold")
+    ax.legend(loc="best", fontsize=14, frameon=True, framealpha=0.9)
+    ax.grid(True, alpha=0.3)
+
+    # Panel B: time vs K (T fixed)
+    sm, se = err([B[k]["scfr_time_med"] for k in B_K],
+                 [B[k]["scfr_time_lo"] for k in B_K],
+                 [B[k]["scfr_time_hi"] for k in B_K])
+    fm, fe = err([B[k]["fscfr_time_med"] for k in B_K],
+                 [B[k]["fscfr_time_lo"] for k in B_K],
+                 [B[k]["fscfr_time_hi"] for k in B_K])
+    ax = axes[1]
+    ax.errorbar(B_K, sm, yerr=se, fmt="o-", color=c_s, capsize=4, lw=2, label="sCFR")
+    ax.errorbar(B_K, fm, yerr=fe, fmt="s-", color=c_f, capsize=4, lw=2, label="fsCFR")
+    ax.set_xlabel("Number of interventions $K$", fontsize=16, fontweight="bold")
+    ax.set_ylabel("Time per fit (s)", fontsize=16, fontweight="bold")
+    ax.set_title(f"(B) Varying $K$ (at $T={RUNTIME_T_FOR_K}$)", fontsize=18, fontweight="bold")
+    ax.set_xticks(B_K)
+    ax.legend(loc="best", fontsize=14, frameon=True, framealpha=0.9)
+    ax.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    os.makedirs(config.OUTPUT_DIR_PLOTS, exist_ok=True)
+    png = os.path.join(config.OUTPUT_DIR_PLOTS, "runtime_scaling.png")
+    pdf = os.path.join(config.OUTPUT_DIR_PLOTS, "runtime_scaling.pdf")
+    plt.savefig(png, dpi=300, bbox_inches="tight")
+    plt.savefig(pdf, bbox_inches="tight")
+    plt.close(fig)
+    # Mirror into docs/figs_tables/ so refresh_docs.py (and a plain pdflatex) can
+    # pick it up without a separate copy step.
+    figs_dir = os.path.join("docs", "figs_tables")
+    try:
+        os.makedirs(figs_dir, exist_ok=True)
+        shutil.copy(pdf, os.path.join(figs_dir, "runtime_scaling.pdf"))
+    except Exception:
+        pass
+    print(f"[Runtime] saved {pdf} (+ png, + docs/figs_tables/runtime_scaling.pdf)")
+
+
+# =============================================================================
+# Sensitivity experiments on a simulation scenario (R2-2 knots, R2-3 priors)
+# =============================================================================
+#
+# Both run on simulation data, where the true intervention magnitudes are known,
+# so the tables show stability across knots / priors AND closeness to the truth.
+# One sCFR (and, for knots, fsCFR) fit per configuration, sequential, checkpointed
+# (one cache file per configuration), with a tqdm bar. Output: a LaTeX table under
+# simulation_outputs/tables/, ready for refresh_docs.py.
+
+SENS_SCENARIO_ID = "S09"          # sinusoidal baseline, K=2, sigma_u=0.10
+# Knot grid brackets the values actually used (sim J=10, real-data J=20); going far
+# beyond this (e.g. 1 knot per ~10 days) over-knots the T~260 series and lets the
+# spline leak with the intervention near a change-point.
+SENS_J_GRID = [5, 10, 15, 20, 30]
+SENS_SEED = config.GLOBAL_BASE_SEED + 777
+SENS_CACHE_DIR = os.path.join(config.OUTPUT_DIR_TABLES, "sensitivity_cache")
+
+# Prior configurations: (label, |beta| log-scale, sigma_u HalfCauchy scale, tau Gamma conc, tau Gamma rate)
+def _prior_base():
+    """Baseline prior configuration: beta=(family,param), sigma=(family,param),
+    tau=(Gamma conc, rate), alpha_sd (Normal sd on spline coefficients)."""
+    return dict(group="Baseline", beta=("lognormal", 0.5), sigma=("halfcauchy", 0.1),
+                tau=(0.01, 0.01), alpha_sd=5.0)
+
+
+def _build_prior_configs():
+    """Comprehensive prior-sensitivity grid (R2-3): vary each prior one at a time,
+    over both scale and distributional family, around the baseline."""
+    cfgs = [("Baseline", _prior_base())]
+
+    def mk(label, group, **ov):
+        c = _prior_base(); c["group"] = group; c.update(ov); cfgs.append((label, c))
+
+    # (A) intervention-magnitude prior |beta|
+    mk("Tighter: $\\mathcal{LN}(\\log0.5,0.25)$", "|beta| prior", beta=("lognormal", 0.25))
+    mk("Diffuse: $\\mathcal{LN}(\\log0.5,1.0)$", "|beta| prior", beta=("lognormal", 1.0))
+    mk("Half-normal: $\\mathcal{HN}(1.0)$", "|beta| prior", beta=("halfnormal", 1.0))
+    # (B) random-effect scale prior sigma_u
+    mk("Tighter: $C^+(0,0.05)$", "sigma_u prior", sigma=("halfcauchy", 0.05))
+    mk("Wider: $C^+(0,0.5)$", "sigma_u prior", sigma=("halfcauchy", 0.5))
+    mk("Half-normal: $\\mathcal{HN}(0.1)$", "sigma_u prior", sigma=("halfnormal", 0.1))
+    mk("Exponential: $\\mathrm{Exp}(10)$", "sigma_u prior", sigma=("exponential", 10.0))
+    # (C) spline-precision prior tau_alpha
+    mk("Stronger: $\\Gamma(1,0.01)$", "tau_alpha prior", tau=(1.0, 0.01))
+    mk("Vaguer: $\\Gamma(0.001,0.001)$", "tau_alpha prior", tau=(0.001, 0.001))
+    mk("$\\Gamma(0.1,0.1)$", "tau_alpha prior", tau=(0.1, 0.1))
+    # (D) spline-coefficient prior alpha
+    mk("Tighter: $\\mathcal{N}(0,2^2)$", "alpha prior", alpha_sd=2.0)
+    mk("Wider: $\\mathcal{N}(0,10^2)$", "alpha prior", alpha_sd=10.0)
+    return cfgs
+
+
+SENS_PRIOR_CONFIGS = _build_prior_configs()
+
+
+def _prior_sig(cfg):
+    """Order-independent cache id derived from the prior configuration content, so
+    adding or removing a configuration does not invalidate the others' caches."""
+    b, s, t = cfg["beta"], cfg["sigma"], cfg["tau"]
+    return f"b{b[0]}{b[1]}-s{s[0]}{s[1]}-t{t[0]}{t[1]}-a{cfg['alpha_sd']}".replace(" ", "")
+
+
+def _sens_scenario():
+    for s in config.SCENARIOS:
+        if s["id"] == SENS_SCENARIO_ID:
+            return s
+    raise ValueError(f"scenario {SENS_SCENARIO_ID} not found")
+
+
+def _sens_data_for_sampler(sim_data, Bm):
+    """Build the NUTS data dict and OLS init for a given B-spline basis Bm."""
+    K = sim_data["num_interventions_true_K"]
+    Z_input = sim_data["Z_input_true"] if K > 0 else np.empty((len(sim_data["d_t"]), 0))
+    bsigns = jnp.array(sim_data["beta_signs_true"]) if (K > 0 and "beta_signs_true" in sim_data) else None
+    data = dict(dt=jnp.array(sim_data["d_t"]), fc_mat=jnp.array(sim_data["Q_true"]),
+                Bm=jnp.array(Bm), Z=jnp.array(Z_input), beta_signs=bsigns)
+    try:
+        init = methods.get_ols_initial_values(
+            sim_data["d_t"], sim_data["Q_true"], Z_input, Bm,
+            beta_signs=sim_data.get("beta_signs_true"), c_t=sim_data.get("c_t"))
+        if not methods._validate_init_params(init):
+            init = None
+    except Exception:
+        init = None
+    return data, init
+
+
+def _beta_dist(family, param, K):
+    if family == "lognormal":
+        return dist.LogNormal(jnp.log(0.5), param).expand([K]).to_event(1)
+    if family == "halfnormal":
+        return dist.HalfNormal(param).expand([K]).to_event(1)
+    raise ValueError(family)
+
+
+def _sigma_dist(family, param):
+    if family == "halfcauchy":
+        return dist.HalfCauchy(param)
+    if family == "halfnormal":
+        return dist.HalfNormal(param)
+    if family == "exponential":
+        return dist.Exponential(param)
+    raise ValueError(family)
+
+
+def _sens_prior_model(cfg):
+    """sCFR model with a fully overridable prior configuration cfg (for R2-3):
+    cfg['beta']=(family,param), cfg['sigma']=(family,param), cfg['tau']=(conc,rate),
+    cfg['alpha_sd']=Normal sd on the spline coefficients."""
+    bfam, bpar = cfg["beta"]; sfam, spar = cfg["sigma"]
+    tconc, trate = cfg["tau"]; asd = cfg["alpha_sd"]
+
+    def model(data):
+        dt, fc_mat, Bm, Z = data['dt'], data['fc_mat'], data['Bm'], data['Z']
+        beta_signs = data.get('beta_signs', None)
+        T, J = dt.shape[0], Bm.shape[1]
+        alpha = numpyro.sample("alpha", dist.Normal(0.0, asd).expand([J]).to_event(1))
+        tau_alpha = numpyro.sample("tau_alpha", dist.Gamma(tconc, trate))
+        if J >= 3:
+            d2 = alpha[2:] - 2.0 * alpha[1:-1] + alpha[:-2]
+            numpyro.factor("rw2_alpha_penalty", -0.5 * tau_alpha * jnp.sum(d2 ** 2))
+        main_logit = jnp.dot(Bm, alpha)
+        sigma_delta = numpyro.sample("sigma_delta", _sigma_dist(sfam, spar))
+        delta_raw = numpyro.sample("delta_raw", dist.Normal(0.0, 1.0).expand([T]).to_event(1))
+        delta = sigma_delta * delta_raw
+        delta = delta - jnp.mean(delta)
+        intervention_logit = 0.0
+        if Z.shape[1] > 0 and beta_signs is not None:
+            beta_abs = numpyro.sample("beta_abs", _beta_dist(bfam, bpar, Z.shape[1]))
+            beta_slope_abs = numpyro.sample("beta_slope_abs", _beta_dist(bfam, bpar, Z.shape[1]))
+            denom = jnp.maximum(T - 1, 1)
+            Z_hinge = (jnp.cumsum(Z, axis=0) - Z) / denom
+            intervention_logit = jnp.dot(Z, beta_abs * beta_signs) + jnp.dot(Z_hinge, beta_slope_abs * beta_signs)
+        mu = jnp.maximum(jnp.dot(fc_mat, jax.nn.sigmoid(main_logit + delta + intervention_logit)), 1e-9)
+        numpyro.sample("obs_deaths", dist.Poisson(mu), obs=dt)
+    return model
+
+
+def _sens_fit_scfr(data, init, key, warmup, samples, model_fn=None):
+    if model_fn is None:
+        mcmc = methods.run_numpyro_sampler(data, key, num_warmup=warmup, num_samples=samples,
+                                           num_chains=1, init_params=init)
+    else:
+        # Heavy-tailed prior configs (diffuse |beta|, half-Cauchy sigma) can defeat
+        # init_to_median; pin the OLS warm start when available (site names match
+        # across families), else fall back to a robust median start.
+        if init is not None:
+            strat = numpyro.infer.init_to_value(values=init)
+        else:
+            strat = numpyro.infer.init_to_median
+        kernel = NUTS(model_fn, target_accept_prob=0.9, init_strategy=strat)
+        mcmc = MCMC(kernel, num_warmup=warmup, num_samples=samples, num_chains=1, progress_bar=False)
+        mcmc.run(key, data)
+    return mcmc.get_samples()
+
+
+def _ms(vals):
+    a = np.asarray(vals, float)
+    a = a[np.isfinite(a)]
+    if a.size == 0:
+        return float("nan"), float("nan")
+    return float(np.mean(a)), float(np.std(a))
+
+
+def _fmt_ms(ms):
+    m, s = ms
+    return f"{m:.3f} $\\pm$ {s:.3f}"
+
+
+def _sens_true(scen):
+    return (float(scen["true_beta_abs_0"][0]), float(scen["true_beta_slope_abs_0"][0]),
+            float(scen.get("sigma_delta_true", 0.0)))
+
+
+def _leakage_diag(B, Z):
+    """Baseline/intervention leakage diagnostics (R2-2), design-only.
+    Returns (L_{Z|B}, max_j L_{j|B}, lambda_min(Z^T M_B Z), kappa(Z^T M_B Z)).
+    """
+    B = np.asarray(B, float); Z = np.asarray(Z, float)
+    P_B = B @ np.linalg.pinv(B.T @ B) @ B.T
+    M_B = np.eye(B.shape[0]) - P_B
+    PBZ = P_B @ Z
+    L = float((np.linalg.norm(PBZ, "fro") ** 2) / (np.linalg.norm(Z, "fro") ** 2))
+    Lj = (np.linalg.norm(PBZ, axis=0) ** 2) / np.maximum(np.linalg.norm(Z, axis=0) ** 2, 1e-12)
+    G = Z.T @ M_B @ Z
+    ev = np.linalg.eigvalsh((G + G.T) / 2.0)
+    lmin = float(np.min(ev))
+    cond = float(np.max(ev) / lmin) if lmin > 1e-12 else float("inf")
+    return L, float(np.max(Lj)), lmin, cond
+
+
+def run_knot_sensitivity(demo=False, warmup=None, samples=None, reps=None):
+    """R2-2: vary spline knots J on a simulation scenario; estimates averaged over
+    independent replicate datasets, reported as mean +/- SD against the known truth."""
+    os.makedirs(SENS_CACHE_DIR, exist_ok=True)
+    warmup = warmup if warmup is not None else config.NUM_WARMUP
+    samples = samples if samples is not None else config.NUM_SAMPLES
+    reps = reps if reps is not None else (10 if demo else config.NUM_MONTE_CARLO_RUNS)
+    scen = _sens_scenario()
+    true_L, true_S, _ = _sens_true(scen)
+
+    tasks = [(J, rep) for J in SENS_J_GRID for rep in range(reps)]
+    per_J = {J: {"scL": [], "scS": [], "fsL": [], "fsS": []} for J in SENS_J_GRID}
+    for J, rep in tqdm(tasks, desc="Knot sensitivity", unit="fit"):
+        cache = os.path.join(SENS_CACHE_DIR, f"knot_{SENS_SCENARIO_ID}_J{J}_rep{rep}.json")
+        if os.path.exists(cache):
+            r = json.load(open(cache))
+        else:
+            sim = data_generation.simulate_scenario_data(scen, SENS_SEED + 1000 * rep)
+            T = len(sim["d_t"])
+            Bm = data_generation.generate_bspline_basis(T, J, config.SPLINE_ORDER)
+            data, init = _sens_data_for_sampler(sim, Bm)
+            s = _sens_fit_scfr(data, init, jax.random.PRNGKey(SENS_SEED + J + rep), warmup, samples)
+            fs = fsCFR_model_wrapper(d_t=sim["d_t"], c_t=sim["c_t"], f_s=sim["f_s_true"], Bm=Bm,
+                                     intervention_times_abs=list(np.asarray(sim["true_intervention_times_0_abs"]).astype(int)),
+                                     intervention_signs=list(np.asarray(sim["beta_signs_true"]).astype(int)), verbose=False)
+            r = dict(J=J, rep=rep,
+                     scL=float(np.mean(s["beta_abs"][:, 0])), scS=float(np.mean(s["beta_slope_abs"][:, 0])),
+                     fsL=float(fs["fsCFR_beta_abs_est"][0]), fsS=float(fs["fsCFR_beta_slope_abs_est"][0]))
+            json.dump(r, open(cache, "w"))
+        for k in ("scL", "scS", "fsL", "fsS"):
+            per_J[J][k].append(r[k])
+
+    # design-only leakage diagnostics per J (R2-2): L_{Z|B}, lambda_min/kappa of Z^T M_B Z
+    sim0 = data_generation.simulate_scenario_data(scen, SENS_SEED)
+    T0 = len(sim0["d_t"])
+    Zfull = np.concatenate([sim0["Z_input_true"], sim0["Z_hinge_true"]], axis=1)
+    leak = {J: _leakage_diag(data_generation.generate_bspline_basis(T0, J, config.SPLINE_ORDER), Zfull)
+            for J in SENS_J_GRID}
+    pd.DataFrame([dict(scenario=SENS_SCENARIO_ID, J=J, L_Z_given_B=leak[J][0],
+                       max_L_j_given_B=leak[J][1], lambda_min_ZMBZ=leak[J][2], cond_ZMBZ=leak[J][3])
+                  for J in SENS_J_GRID]).to_csv(
+        os.path.join(config.OUTPUT_DIR_TABLES, "leakage_diagnostics.csv"), index=False)
+
+    rows = [dict(J=J, scL=_ms(per_J[J]["scL"]), scS=_ms(per_J[J]["scS"]),
+                 fsL=_ms(per_J[J]["fsL"]), fsS=_ms(per_J[J]["fsS"]),
+                 LZB=leak[J][0], lmin=leak[J][2]) for J in SENS_J_GRID]
+    _write_knot_table(rows, true_L, true_S, reps)
+
+
+def run_prior_sensitivity(demo=False, warmup=None, samples=None, reps=None):
+    """R2-3: vary priors on a simulation scenario; sCFR posterior averaged over
+    independent replicate datasets, reported as mean +/- SD against the known truth."""
+    os.makedirs(SENS_CACHE_DIR, exist_ok=True)
+    warmup = warmup if warmup is not None else config.NUM_WARMUP
+    samples = samples if samples is not None else config.NUM_SAMPLES
+    reps = reps if reps is not None else (10 if demo else config.NUM_MONTE_CARLO_RUNS)
+    scen = _sens_scenario()
+    true_L, true_S, true_su = _sens_true(scen)
+
+    n_cfg = len(SENS_PRIOR_CONFIGS)
+    tasks = [(i, rep) for i in range(n_cfg) for rep in range(reps)]
+    # per config: lists over reps of posterior MEAN and posterior SD of beta_L, beta_S, sigma_u
+    per_cfg = {i: {k: [] for k in ("L", "S", "su", "Lsd", "Ssd")} for i in range(n_cfg)}
+    for i, rep in tqdm(tasks, desc="Prior sensitivity", unit="fit"):
+        label, cfg = SENS_PRIOR_CONFIGS[i]
+        cache = os.path.join(SENS_CACHE_DIR, f"prior_{SENS_SCENARIO_ID}_{_prior_sig(cfg)}_rep{rep}.json")
+        if os.path.exists(cache):
+            r = json.load(open(cache))
+        else:
+            sim = data_generation.simulate_scenario_data(scen, SENS_SEED + 1000 * rep)
+            T = len(sim["d_t"])
+            Bm = data_generation.generate_bspline_basis(T, config.N_SPLINE_KNOTS_J, config.SPLINE_ORDER)
+            data, init = _sens_data_for_sampler(sim, Bm)
+            s = _sens_fit_scfr(data, init, jax.random.PRNGKey(SENS_SEED + 13 * (i + 1) + rep),
+                               warmup, samples, model_fn=_sens_prior_model(cfg))
+            bL, bS = np.asarray(s["beta_abs"][:, 0]), np.asarray(s["beta_slope_abs"][:, 0])
+            r = dict(i=i, rep=rep, L=float(bL.mean()), S=float(bS.mean()),
+                     su=float(np.mean(s["sigma_delta"])), Lsd=float(bL.std()), Ssd=float(bS.std()))
+            json.dump(r, open(cache, "w"))
+        for k in ("L", "S", "su", "Lsd", "Ssd"):
+            per_cfg[i][k].append(r[k])
+
+    # baseline (config 0) posterior SD = scale for the prior-sensitivity index
+    baseL = float(np.mean(per_cfg[0]["L"])); baseS = float(np.mean(per_cfg[0]["S"]))
+    sdL = max(float(np.mean(per_cfg[0]["Lsd"])), 1e-6)
+    sdS = max(float(np.mean(per_cfg[0]["Ssd"])), 1e-6)
+
+    rows = []
+    for i in range(n_cfg):
+        L = _ms(per_cfg[i]["L"]); S = _ms(per_cfg[i]["S"]); su = _ms(per_cfg[i]["su"])
+        # prior-sensitivity index: posterior shift relative to baseline posterior SD
+        sidx = max(abs(L[0] - baseL) / sdL, abs(S[0] - baseS) / sdS)
+        rows.append(dict(label=SENS_PRIOR_CONFIGS[i][0], group=SENS_PRIOR_CONFIGS[i][1]["group"],
+                         L=L, S=S, su=su, sidx=float(sidx)))
+    # transparency CSV
+    pd.DataFrame([dict(config=r["label"], group=r["group"], beta_L_mean=r["L"][0], beta_L_sd=r["L"][1],
+                       beta_S_mean=r["S"][0], beta_S_sd=r["S"][1], sigma_u_mean=r["su"][0],
+                       sensitivity_index=r["sidx"]) for r in rows]).to_csv(
+        os.path.join(config.OUTPUT_DIR_TABLES, "prior_sensitivity.csv"), index=False)
+    _write_prior_table(rows, true_L, true_S, true_su, reps)
+
+
+def _write_knot_table(rows, true_L, true_S, reps):
+    body = ""
+    for r in rows:
+        body += (f"\\multirow{{2}}{{*}}{{{r['J']}}} & sCFR & {_fmt_ms(r['scL'])} & {_fmt_ms(r['scS'])} "
+                 f"& \\multirow{{2}}{{*}}{{{r['LZB']:.3f}}} & \\multirow{{2}}{{*}}{{{r['lmin']:.2e}}} \\\\\n"
+                 f" & fsCFR & {_fmt_ms(r['fsL'])} & {_fmt_ms(r['fsS'])} & & \\\\\n\\addlinespace\n")
+    tex = (
+        r"\begin{table}[htbp]" "\n\\centering\n"
+        r"\caption{Knot sensitivity and leakage (scenario " + SENS_SCENARIO_ID +
+        r"; truth: level and slope $=0.60$). Level $\beta^{(L)}_{\text{abs},1}$ and slope $\beta^{(S)}_{\text{abs},1}$ estimates (sCFR posterior mean, fsCFR point; mean\,$\pm$\,SD) across knot counts $J$. The design-only $\mathcal{L}_{Z\mid B}$ and $\lambda_{\min}(\bm{Z}^\top\bm{M}_B\bm{Z})$ gauge baseline/intervention separation, which is weaker for larger $\mathcal{L}_{Z\mid B}$ or smaller $\lambda_{\min}$.}" "\n"
+        r"\label{tab:knot_sensitivity}" "\n"
+        r"\resizebox{\textwidth}{!}{%" "\n"
+        r"\begin{tabular}{cccccc}" "\n\\toprule\n"
+        r"$J$ & Method & $\beta^{(L)}_{\text{abs},1}$ & $\beta^{(S)}_{\text{abs},1}$ & $\mathcal{L}_{Z\mid B}$ & $\lambda_{\min}(\bm{Z}^\top\bm{M}_B\bm{Z})$ \\" "\n\\midrule\n"
+        + body +
+        r"\bottomrule" "\n\\end{tabular}\n}\n\\end{table}\n"
+    )
+    out = os.path.join(config.OUTPUT_DIR_TABLES, "knot_sensitivity.tex")
+    with open(out, "w", encoding="utf-8") as fh:
+        fh.write(tex)
+    print(f"[knot ] wrote {out}")
+
+
+def _write_prior_table(rows, true_L, true_S, true_su, reps):
+    gdisp = {"|beta| prior": r"the intervention-magnitude prior $|\bm{\beta}|$",
+             "sigma_u prior": r"the random-effect scale prior $\sigma_u$",
+             "tau_alpha prior": r"the spline-precision prior $\tau_\alpha$",
+             "alpha prior": r"the spline-coefficient prior $\bm{\alpha}$"}
+    body = f"True & {true_L:.3f} & {true_S:.3f} & {true_su:.3f} & -- \\\\\n\\midrule\n"
+    last_group = None
+    for r in rows:
+        if r["group"] != "Baseline" and r["group"] != last_group:
+            body += f"\\addlinespace\n\\multicolumn{{5}}{{l}}{{\\textit{{Varying {gdisp.get(r['group'], r['group'])}}}}}\\\\\n"
+            last_group = r["group"]
+        sidx = "--" if r["group"] == "Baseline" else f"{r['sidx']:.2f}"
+        body += (f"\\quad {r['label']} & {_fmt_ms(r['L'])} & {_fmt_ms(r['S'])} "
+                 f"& {_fmt_ms(r['su'])} & {sidx} \\\\\n")
+    tex = (
+        r"\begin{table}[htbp]" "\n\\centering\n"
+        r"\caption{Prior sensitivity (scenario " + SENS_SCENARIO_ID +
+        r"; truth: level $0.60$, slope $0.60$, $\sigma_u=0.10$). sCFR posterior-mean level $\beta^{(L)}_{\text{abs},1}$, slope $\beta^{(S)}_{\text{abs},1}$, and $\sigma_u$ (mean\,$\pm$\,SD) under priors varied one at a time, in scale and family, around the baseline ($\mathcal{LN}(\log0.5,0.5)$ on $|\bm{\beta}|$, $C^+(0,0.1)$ on $\sigma_u$, $\Gamma(0.01,0.01)$ on $\tau_\alpha$, $\mathcal{N}(0,5^2)$ on $\bm{\alpha}$). The index $S=\max_{j\in\{L,S\}}|\widehat\beta_j-\widehat\beta_j^{\text{base}}|/\widehat{\mathrm{sd}}(\beta_j^{\text{base}})$ is the largest shift from the baseline estimate $\widehat\beta_j^{\text{base}}$ in baseline posterior SDs; $S<1$ is within posterior uncertainty.}" "\n"
+        r"\label{tab:prior_sensitivity}" "\n"
+        r"\resizebox{\textwidth}{!}{%" "\n"
+        r"\begin{tabular}{p{0.34\textwidth}cccc}" "\n\\toprule\n"
+        r"Prior configuration & $\beta^{(L)}_{\text{abs},1}$ & $\beta^{(S)}_{\text{abs},1}$ & $\sigma_u$ & $S$ \\" "\n\\midrule\n"
+        + body +
+        r"\bottomrule" "\n\\end{tabular}\n}\n\\end{table}\n"
+    )
+    out = os.path.join(config.OUTPUT_DIR_TABLES, "prior_sensitivity.tex")
+    with open(out, "w", encoding="utf-8") as fh:
+        fh.write(tex)
+    print(f"[prior] wrote {out}")
+
+
+# =============================================================================
+# Misspecified-scenario experiment (R2-6)
+# =============================================================================
+MISSPEC_CACHE_DIR = os.path.join(config.OUTPUT_DIR_TABLES, "misspec_cache")
+MISSPEC_SEED = 909
+MISSPEC_NB_SIZE = 100.0   # negative-binomial size: moderate overdispersion (variance ~1.9x mean)
+# (display label, kind, departure described in the caption)
+MISSPEC_KINDS = [
+    ("Well-specified", "well", "i.i.d.\\ effects, hinge intervention, Poisson, correct delay"),
+    ("AR(1) day-level effects", "ar1", "$u_t=0.7\\,u_{t-1}+\\varepsilon_t$ (serial correlation)"),
+    ("Saturating intervention", "saturating", "gradual exponential onset, not level/slope hinge"),
+    ("Negative-binomial deaths", "negbin", "overdispersed deaths, not Poisson"),
+    ("Misspecified delay", "delay", "data delay $1.5\\times$ the fitted onset-to-death mean"),
+]
+
+
+def _scfr_traj_logit(samples, Bm, Z_step, Z_hinge, signs):
+    """Reconstruct per-draw factual and counterfactual logit-CFR from sCFR samples."""
+    A = np.asarray(samples["alpha"])                       # S x J
+    main = A @ Bm.T                                        # S x T
+    dr = np.asarray(samples["delta_raw"]); sd = np.asarray(samples["sigma_delta"])[:, None]
+    u = sd * (dr - dr.mean(axis=1, keepdims=True))         # S x T, centered
+    signs = np.asarray(signs, float)
+    ba = np.asarray(samples["beta_abs"]); bs = np.asarray(samples["beta_slope_abs"])
+    interv = (ba * signs) @ Z_step.T + (bs * signs) @ Z_hinge.T
+    return main + u + interv, main + u                     # logit_F, logit_CF
+
+
+def _logit_mae(r_hat, true_logit):
+    rc = np.clip(np.asarray(r_hat, float), 1e-6, 1 - 1e-6)
+    return float(np.mean(np.abs(np.log(rc / (1 - rc)) - true_logit)))
+
+
+def _logit_mae_p(true_p, est_p):
+    """Logit-scale MAE between two probability vectors (matches evaluation.calculate_logit_mae)."""
+    eps = 1e-6
+    tc = np.clip(np.asarray(true_p, float), eps, 1 - eps)
+    ec = np.clip(np.asarray(est_p, float), eps, 1 - eps)
+    return float(np.mean(np.abs(np.log(ec / (1 - ec)) - np.log(tc / (1 - tc)))))
+
+
+def run_misspecification(demo=False, warmup=None, samples=None, reps=None):
+    """R2-6: generate data under misspecified DGPs (departing one assumption at a
+    time) and compare sCFR and fsCFR recovery of the factual and counterfactual CFR
+    against the known truth, averaged over replicate datasets."""
+    os.makedirs(MISSPEC_CACHE_DIR, exist_ok=True)
+    warmup = warmup if warmup is not None else config.NUM_WARMUP
+    samples = samples if samples is not None else config.NUM_SAMPLES
+    reps = reps if reps is not None else (10 if demo else config.NUM_MONTE_CARLO_RUNS)
+
+    kinds = [k for _, k, _ in MISSPEC_KINDS]
+    kind_idx = {k: i for i, k in enumerate(kinds)}
+    tasks = [(k, rep) for k in kinds for rep in range(reps)]
+    acc = {k: {m: [] for m in ("scF", "scCF", "scCov", "fsF", "fsCF")} for k in kinds}
+    for kind, rep in tqdm(tasks, desc="Misspecification", unit="fit"):
+        cache = os.path.join(MISSPEC_CACHE_DIR, f"ms_{kind}_rep{rep}.json")
+        if os.path.exists(cache):
+            r = json.load(open(cache))
+        else:
+            sim = data_generation.simulate_misspecified_data(MISSPEC_SEED + 1000 * rep, kind,
+                                                             nb_size=MISSPEC_NB_SIZE)
+            Bm = sim["Bm_true"]
+            Z_step, Z_hinge = sim["Z_input_true"], sim["Z_hinge_true"]
+            signs = np.asarray(sim["beta_signs_true"], float)
+            # Mirror the main simulation evaluation exactly (evaluation.py): noisy factual
+            # and counterfactual CFR targets on the analysis window [0:T_an), estimates with
+            # the day-level effect retained, logit MAE via clip-then-logit.
+            T_an = config.T_ANALYSIS_LENGTH
+            true_rF = np.asarray(sim["true_r_0_t"])[:T_an]
+            true_rCF = np.asarray(sim["true_rcf_0_t"])[:T_an]
+            data, init = _sens_data_for_sampler(sim, Bm)
+            s = _sens_fit_scfr(data, init, jax.random.PRNGKey(MISSPEC_SEED + 7 * rep + 101 * kind_idx[kind]),
+                               warmup, samples)
+            lF, lCF = _scfr_traj_logit(s, Bm, Z_step, Z_hinge, signs)   # include u
+            rF_draws = 1.0 / (1.0 + np.exp(-lF)); rCF_draws = 1.0 / (1.0 + np.exp(-lCF))
+            scF = _logit_mae_p(true_rF, rF_draws.mean(0)[:T_an])
+            scCF = _logit_mae_p(true_rCF, rCF_draws.mean(0)[:T_an])
+            lo, hi = np.percentile(rF_draws[:, :T_an], [2.5, 97.5], axis=0)
+            scCov = float(np.mean((true_rF >= lo) & (true_rF <= hi)))
+            fs = fsCFR_model_wrapper(d_t=sim["d_t"], c_t=sim["c_t"], f_s=sim["f_s_true"], Bm=Bm,
+                                     intervention_times_abs=[int(sim["true_intervention_times_0_abs"][0])],
+                                     intervention_signs=list(signs.astype(int)), verbose=False)
+            fsF = _logit_mae_p(true_rF, np.asarray(fs["fsCFR_factual_mean"])[:T_an])
+            fsCF = _logit_mae_p(true_rCF, np.asarray(fs["fsCFR_counterfactual_mean"])[:T_an])
+            r = dict(kind=kind, rep=rep, scF=scF, scCF=scCF, scCov=scCov, fsF=fsF, fsCF=fsCF)
+            json.dump(r, open(cache, "w"))
+        for m in ("scF", "scCF", "scCov", "fsF", "fsCF"):
+            acc[kind][m].append(r[m])
+
+    rows = []
+    for label, kind, _ in MISSPEC_KINDS:
+        a = acc[kind]
+        rows.append(dict(label=label, scF=_ms(a["scF"]), scCF=_ms(a["scCF"]),
+                         scCov=_ms(a["scCov"]), fsF=_ms(a["fsF"]), fsCF=_ms(a["fsCF"])))
+    pd.DataFrame([dict(scenario=r["label"], scfr_factual_mae=r["scF"][0],
+                       scfr_cf_mae=r["scCF"][0], scfr_cov95=r["scCov"][0],
+                       fscfr_factual_mae=r["fsF"][0], fscfr_cf_mae=r["fsCF"][0]) for r in rows]).to_csv(
+        os.path.join(config.OUTPUT_DIR_TABLES, "misspecification.csv"), index=False)
+    _write_misspec_table(rows, reps)
+
+
+def _write_misspec_table(rows, reps):
+    body = ""
+    for r in rows:
+        body += (f"\\multirow{{2}}{{*}}{{{r['label']}}} & sCFR & {_fmt_ms(r['scF'])} & {_fmt_ms(r['scCF'])} "
+                 f"& {_fmt_ms(r['scCov'])} \\\\\n"
+                 f" & fsCFR & {_fmt_ms(r['fsF'])} & {_fmt_ms(r['fsCF'])} & -- \\\\\n\\addlinespace\n")
+    tex = (
+        r"\begin{table}[htbp]" "\n\\centering\n"
+        r"\caption{Misspecified scenarios. Each row draws data from a process that departs"
+        r" from the sCFR estimator along one axis (relative to a single-intervention"
+        r" sinusoidal-baseline reference), while both methods fit their standard form."
+        r" Columns: mean absolute error of the factual and counterfactual CFR on the logit"
+        r" scale over the analysis window (mean\,$\pm$\,SD), and the empirical coverage of the sCFR"
+        r" $95\%$ credible interval for the factual CFR. Lower MAE is better; coverage near"
+        r" $0.95$ is calibrated.}" "\n"
+        r"\label{tab:misspecification}" "\n"
+        r"\resizebox{\textwidth}{!}{%" "\n"
+        r"\begin{tabular}{llccc}" "\n\\toprule\n"
+        r"Data-generating process & Method & Factual MAE & Counterfactual MAE & sCFR 95\% coverage \\" "\n\\midrule\n"
+        + body +
+        r"\bottomrule" "\n\\end{tabular}\n}\n\\end{table}\n"
+    )
+    out = os.path.join(config.OUTPUT_DIR_TABLES, "misspecification.tex")
+    with open(out, "w", encoding="utf-8") as fh:
+        fh.write(tex)
+    print(f"[misspec] wrote {out}")
 
 
 # =============================================================================
@@ -517,7 +1298,11 @@ def main():
     mode_group = parser.add_mutually_exclusive_group(required=True)
     mode_group.add_argument('--simulate', action='store_true', help="Run simulation")
     mode_group.add_argument('--analyze', action='store_true', help="Analyze existing results")
-    
+    mode_group.add_argument('--runtime', action='store_true', help="Run the Section 3.5 computational (timing/scalability) experiment")
+    mode_group.add_argument('--knot', action='store_true', help="Run the knot-sensitivity experiment (R2-2) on a simulation scenario")
+    mode_group.add_argument('--prior', action='store_true', help="Run the prior-sensitivity experiment (R2-3) on a simulation scenario")
+    mode_group.add_argument('--misspec', action='store_true', help="Run the misspecified-scenario experiment (R2-6)")
+
     parser.add_argument('--demo', action='store_true', help="Demo mode (5 runs per scenario)")
     parser.add_argument('--full', action='store_true', help="Full mode (all configured runs)")
     parser.add_argument('--reset', action='store_true', help="Clear all outputs and restart")
@@ -544,8 +1329,33 @@ def main():
     else:
         ensure_directories()
     
+    if args.runtime:
+        # Section 3.5 timing experiment. Demo uses the full-scale grid and the
+        # production NUTS length, differing from full only in the replicate count (10).
+        run_runtime_experiment(demo=args.demo)
+        return
+
+    # The added simulation experiments (knot R2-2, prior R2-3, misspec R2-6) use the
+    # SAME NUTS length and settings in demo and full; demo differs only by using
+    # fewer replicate datasets (10). All other methods/parameters are identical.
+    if args.knot:
+        run_knot_sensitivity(demo=args.demo)
+        return
+
+    if args.prior:
+        run_prior_sensitivity(demo=args.demo)
+        return
+
+    if args.misspec:
+        run_misspecification(demo=args.demo)
+        return
+
     if args.analyze:
         run_analysis()
+        try:
+            aggregate_and_plot_runtime(demo=args.demo)
+        except Exception as e:
+            print(f"[Warning] Runtime figure regeneration skipped: {e}")
     else:
         tasks = []
         base_seed = config.GLOBAL_BASE_SEED

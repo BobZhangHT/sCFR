@@ -14,3 +14,6 @@
 *.swo
 *~
 .DS_Store
+/docs
+CLAUDE*.md
+reviewer_extracted.txt

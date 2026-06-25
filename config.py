@@ -17,13 +17,12 @@ import numpy as np
 # Simulation Settings
 # =============================================================================
 
-NUM_MONTE_CARLO_RUNS = 1000
+NUM_MONTE_CARLO_RUNS = 500
 T_ANALYSIS_LENGTH = 200
 T_SIMULATION_BUFFER = 60
 T_SERIES_LENGTH_SIM = T_ANALYSIS_LENGTH + T_SIMULATION_BUFFER
 GLOBAL_BASE_SEED = 2025
-NUM_CORES_TO_USE = -1  # -1 means use all available cores
-OVERWRITE_EXISTING_RESULTS = True
+NUM_CORES_TO_USE = -1  # -1 means all available cores; appropriate for server runs
 
 # Storage optimization settings
 # If False, posterior samples are not saved (only summaries are saved)
