@@ -18,6 +18,10 @@ import numpy as np
 # =============================================================================
 
 NUM_MONTE_CARLO_RUNS = 500
+# Replicate datasets for the auxiliary experiments (knot R2-2, prior R2-3,
+# misspec R2-6) at full scale. Matches the main grid (500); the experiments now
+# run in parallel (joblib), so the full count is affordable.
+AUX_NUM_REPLICATIONS = 500
 T_ANALYSIS_LENGTH = 200
 T_SIMULATION_BUFFER = 60
 T_SERIES_LENGTH_SIM = T_ANALYSIS_LENGTH + T_SIMULATION_BUFFER

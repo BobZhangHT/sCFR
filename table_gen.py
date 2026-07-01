@@ -1,3 +1,15 @@
+"""
+Generate the intervention-magnitude LaTeX table (Table beta_abs_mae_Kpos_nocov).
+
+Reads the aggregated beta-magnitude MAE summary CSV produced by the simulation
+analysis and writes a booktabs LaTeX table comparing sCFR and fsCFR on the step
+and slope MAE for scenarios with interventions (K > 0), two rows per scenario
+(sCFR, fsCFR). Adjust CSV_PATH / OUT_TEX below to point at the desired result set.
+
+Usage:
+    python table_gen.py
+"""
+
 import pandas as pd
 import numpy as np
 

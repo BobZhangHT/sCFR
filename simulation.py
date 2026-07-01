@@ -3,31 +3,53 @@ Simulation runner for sCFR study.
 
 Modes
 -----
---simulate [--demo|--full] [--reset]
-    Monte Carlo simulation over all 12 scenarios.
-    demo : 5 reps/scenario, 5 parallel workers (local quick-check)
-    full : config.NUM_MONTE_CARLO_RUNS (500) reps/scenario, all cores
+--simulate [--demo|--full] [--reset] [--main-only] [--no-refresh]
+    One-stop driver. Runs, in order:
+      1. the main Monte Carlo grid over all 12 scenarios,
+      2. the four auxiliary experiments (knot Table 3, prior Table 4,
+         misspec Table 5, runtime Figure 5),
+      3. run_analysis() to build the figures and the beta-MAE table, and
+      4. refresh_docs.py to sync docs/figs_tables.
+    demo : 5 reps/scenario for the main grid, 10 for each auxiliary.
+    full : config.NUM_MONTE_CARLO_RUNS (500) reps/scenario for the main grid;
+           config.AUX_NUM_REPLICATIONS (500) reps for knot/prior/misspec and 100
+           reps for runtime; all cores. All experiments run in parallel (joblib);
+           the runtime timing pins each fit to a dedicated core so parallelism does
+           not corrupt the wall-clock measurement.
+    Break-point support: completed main runs and cached auxiliary replicates are
+    skipped, so re-invoking `--simulate --full` resumes and runs only what is
+    missing (e.g. promoting 10-rep demo auxiliaries to the full count).
+    --main-only  skip the auxiliary experiments (run the main grid only).
+    --no-refresh skip the automatic refresh_docs.py sync at the end.
+
+    Typical full-scale server command (single line):
+        OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 \\
+            python simulation.py --simulate --full
 
 --analyze
     Re-run analysis/plotting on existing simulation_outputs/.
 
+The individual modes below (--runtime/--knot/--prior/--misspec) remain available
+for running one auxiliary experiment in isolation.
+
 --runtime [--demo]
-    Section 3.5 timing/scalability experiment (sequential NUTS fits).
+    Section 3.5 timing/scalability experiment. Parallel, but each timed fit is
+    pinned to a dedicated core (single-threaded) so the wall-clock stays valid.
     Grid: T in {100,200,400,800,1200}, K in {1,2,4,8}.
     demo : 10 reps/setting;  full : 100 reps/setting.
 
 --knot [--demo]
     R2-2 knot-sensitivity experiment on scenario S09 (sinusoidal, K=2).
-    J grid: {5,10,15,20,30}.
-    demo : 10 reps;  full : config.NUM_MONTE_CARLO_RUNS (500) reps.
+    J grid: {5,10,15,20,30}. Fits run in parallel (joblib).
+    demo : 10 reps;  full : config.AUX_NUM_REPLICATIONS (500) reps.
 
 --prior [--demo]
     R2-3 prior-sensitivity experiment on scenario S09.
-    13 prior configurations (scale + family, one-at-a-time).
+    13 prior configurations (scale + family, one-at-a-time). Parallel (joblib).
     demo : 10 reps;  full : 500 reps.
 
 --misspec [--demo]
-    R2-6 misspecified-DGP experiment (5 data-generating processes).
+    R2-6 misspecified-DGP experiment (5 data-generating processes). Parallel (joblib).
     demo : 10 reps;  full : 500 reps.
 
 Server full-scale commands (run from repo root, set BLAS to single-thread):
@@ -50,17 +72,43 @@ import numpy as np
 import pandas as pd
 from joblib import Parallel, delayed
 from tqdm import tqdm
-import jax
-import jax.numpy as jnp
-import numpyro
-import numpyro.distributions as dist
-from numpyro.infer import MCMC, NUTS
+
+# Force single-threaded numerical libraries BEFORE importing JAX, so each fit uses
+# exactly one core. This lets the parallel runs (main grid, knot/prior/misspec, and
+# the core-pinned runtime timing) scale cleanly across cores, and keeps per-fit
+# wall-clock measurements valid. setdefault respects any value the user exports.
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
+os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
+os.environ.setdefault("XLA_FLAGS",
+                      "--xla_cpu_multi_thread_eigen=false intra_op_parallelism_threads=1")
+
+import multiprocessing
 
 import config
-import methods
 import data_generation
 import evaluation as ev
 from fsCFR_python import fsCFR_model_wrapper
+
+# JAX/NumPyro (and methods, which imports them) power the model fitting. Import them
+# optionally so that analysis, plotting, and cached-result regeneration still work
+# when JAX is unavailable, e.g. blocked by a Windows application-control policy.
+# Fitting requires JAX; those code paths raise a clear error if called without it.
+try:
+    import jax
+    import jax.numpy as jnp
+    import numpyro
+    import numpyro.distributions as dist
+    from numpyro.infer import MCMC, NUTS
+    import methods
+    _JAX_AVAILABLE = True
+except Exception as _jax_import_error:  # noqa: BLE001
+    jax = jnp = numpyro = dist = MCMC = NUTS = methods = None
+    _JAX_AVAILABLE = False
+    print(f"[simulation] WARNING: JAX/NumPyro unavailable ({_jax_import_error}). "
+          f"Model fitting is disabled; analysis, plotting, and cached-result "
+          f"regeneration still work.")
 
 
 # =============================================================================
@@ -437,14 +485,18 @@ def run_analysis():
 # Computational Experiment (Section 3.5: cost, scalability, online updating)
 # =============================================================================
 #
-# This is a TIMING experiment, so the timed fits run SEQUENTIALLY: executing
-# fits concurrently would make them contend for CPU cores and corrupt the
-# wall-clock latency we are trying to measure. The experiment is still
-# one-click, shows a progress bar, and is fully checkpointed/resumable (one
-# cache file per replicate). Compilation cost is removed by a single throwaway
-# fit per (T, K) setting plus median/IQR aggregation, which is robust to any
-# stray compile-inflated replicate. Replicate seeds vary, so each replicate is
-# a distinct data realization (Plan A).
+# This is a TIMING experiment. To keep the wall-clock measurement valid while still
+# running in parallel, each worker is pinned to a single dedicated core (via CPU
+# affinity) and every numerical library runs single-threaded, so a timed fit has a
+# core to itself and does not contend with the other workers for CPU time. The
+# experiment is one-click, shows a progress bar, and is fully checkpointed/resumable
+# (one cache file per replicate). Compilation cost is removed by a single throwaway
+# fit per (T, K) setting in each worker, plus median/IQR aggregation that is robust
+# to any stray compile-inflated replicate. Replicate seeds vary, so each replicate
+# is a distinct data realization (Plan A). Residual shared-resource effects (turbo
+# clocking, memory bandwidth) are second-order and consistent across settings, so
+# the scaling trends and the sCFR/fsCFR comparison are preserved; for the cleanest
+# absolute times, use fewer workers via --jobs.
 
 RUNTIME_CACHE_DIR = os.path.join(config.OUTPUT_DIR_TABLES, "runtime_cache")
 RUNTIME_T_FOR_K = 200          # series length held fixed while K is varied
@@ -531,51 +583,90 @@ def _runtime_time_fscfr(data):
     return time.perf_counter() - t0
 
 
-def run_runtime_experiment(demo=False, warmup=None, samples=None):
-    """Run the Section 3.5 computational experiment (sequential timing, cached)."""
+# Process-local state for the runtime workers: the set of (T,K) already JIT-warmed
+# in this worker, and the single core this worker is pinned to.
+_RT_WARMED = set()
+_RT_CORE = None
+
+
+def _runtime_cache(kind, T, K, rep):
+    return os.path.join(RUNTIME_CACHE_DIR, f"{kind}_T{T}_K{K}_rep{rep}.json")
+
+
+def _pin_to_dedicated_core(ctr, lock, n_cores):
+    """Pin this worker process to a single, distinct core (once). A timed fit then
+    runs on a dedicated core with no scheduling contention from the other parallel
+    workers, so its wall-clock measurement stays valid. No-op where CPU affinity is
+    unavailable (e.g. Windows); there the local demo timing is approximate."""
+    global _RT_CORE
+    if _RT_CORE is not None or not hasattr(os, "sched_setaffinity"):
+        return
+    with lock:
+        _RT_CORE = ctr.value % max(int(n_cores), 1)
+        ctr.value += 1
+    try:
+        os.sched_setaffinity(0, {_RT_CORE})
+    except OSError:
+        pass
+
+
+def _runtime_one(kind, T, K, rep, warmup, samples, ctr, lock, n_cores):
+    """One timed (sCFR, fsCFR) fit for the runtime experiment (cache-or-compute).
+    The worker pins itself to a dedicated core and runs single-threaded, and a
+    throwaway warmup fit per (T,K) absorbs JIT compilation before timing."""
+    cache = _runtime_cache(kind, T, K, rep)
+    if os.path.exists(cache):
+        return
+    _pin_to_dedicated_core(ctr, lock, n_cores)
+    seed = 1_000_000 + T * 1000 + K * 100 + rep
+    data = _runtime_build_data(T, K, seed)
+    if (T, K) not in _RT_WARMED:
+        try:
+            _runtime_time_scfr(data, min(warmup, 50), min(samples, 50), seed)
+            _runtime_time_fscfr(data)
+        except Exception as e:
+            print(f"[Runtime] warmup ({T},{K}) failed: {e}")
+        _RT_WARMED.add((T, K))
+    try:
+        scfr_t = _runtime_time_scfr(data, warmup, samples, seed)
+        fscfr_t = _runtime_time_fscfr(data)
+    except Exception as e:
+        print(f"[Runtime] fit ({kind},T={T},K={K},rep={rep}) failed: {e}")
+        return
+    with open(cache, 'w') as fh:
+        json.dump(dict(kind=kind, T=T, K=K, rep=rep,
+                       scfr_time=scfr_t, fscfr_time=fscfr_t), fh)
+
+
+def run_runtime_experiment(demo=False, warmup=None, samples=None, n_jobs=None):
+    """Run the Section 3.5 computational experiment, parallel and cached. Each timed
+    fit runs single-threaded on a dedicated, pinned core, so parallelism removes
+    scheduling contention and the per-fit wall-clock measurement stays valid."""
     os.makedirs(RUNTIME_CACHE_DIR, exist_ok=True)
     warmup = warmup if warmup is not None else config.NUM_WARMUP
     samples = samples if samples is not None else config.NUM_SAMPLES
+    n_jobs = n_jobs if n_jobs is not None else config.NUM_CORES_TO_USE
     T_grid = RUNTIME_T_GRID_DEMO if demo else RUNTIME_T_GRID_FULL
     K_grid = RUNTIME_K_GRID_DEMO if demo else RUNTIME_K_GRID_FULL
 
     # (kind, T, K): scale_T sweeps T at K=1; scale_K sweeps K at T=RUNTIME_T_FOR_K.
     settings = [("scale_T", T, 1) for T in T_grid]
     settings += [("scale_K", RUNTIME_T_FOR_K, K) for K in K_grid if K != 1]
+    tasks = [(kind, T, K, rep) for kind, T, K in settings
+             for rep in range(_runtime_reps_for_T(T, demo))]
+    todo = [t for t in tasks if not os.path.exists(_runtime_cache(*t))]
 
-    tasks = []
-    for kind, T, K in settings:
-        for rep in range(_runtime_reps_for_T(T, demo)):
-            tasks.append((kind, T, K, rep))
-
-    print(f"[Runtime] {len(tasks)} timed fits "
-          f"(NUTS {warmup}+{samples}); sequential for valid wall-clock timing.")
-
-    warmed = set()  # (T, K) already JIT-compiled in this process
-    for kind, T, K, rep in tqdm(tasks, desc="Runtime experiment", unit="fit"):
-        cache = os.path.join(RUNTIME_CACHE_DIR, f"{kind}_T{T}_K{K}_rep{rep}.json")
-        if os.path.exists(cache):
-            warmed.add((T, K))
-            continue
-        seed = 1_000_000 + T * 1000 + K * 100 + rep
-        data = _runtime_build_data(T, K, seed)
-        if (T, K) not in warmed:
-            # one throwaway fit per setting to absorb JIT compilation
-            try:
-                _runtime_time_scfr(data, min(warmup, 50), min(samples, 50), seed)
-                _runtime_time_fscfr(data)
-            except Exception as e:
-                print(f"[Runtime] warmup ({T},{K}) failed: {e}")
-            warmed.add((T, K))
-        try:
-            scfr_t = _runtime_time_scfr(data, warmup, samples, seed)
-            fscfr_t = _runtime_time_fscfr(data)
-        except Exception as e:
-            print(f"[Runtime] fit ({kind},T={T},K={K},rep={rep}) failed: {e}")
-            continue
-        with open(cache, 'w') as fh:
-            json.dump(dict(kind=kind, T=T, K=K, rep=rep,
-                           scfr_time=scfr_t, fscfr_time=fscfr_t), fh)
+    n_cores = (os.cpu_count() or 1) if n_jobs in (None, -1) else max(int(n_jobs), 1)
+    print(f"[Runtime] {len(tasks)} timed fits (NUTS {warmup}+{samples}); "
+          f"{len(tasks) - len(todo)} cached, {len(todo)} to run. Parallel with each fit "
+          f"pinned to a dedicated core (single-threaded) for valid wall-clock timing.")
+    if todo:
+        mgr = multiprocessing.Manager()
+        ctr = mgr.Value('i', 0)
+        lock = mgr.Lock()
+        Parallel(n_jobs=n_jobs, backend='loky')(
+            delayed(_runtime_one)(kind, T, K, rep, warmup, samples, ctr, lock, n_cores)
+            for kind, T, K, rep in tqdm(todo, desc="Runtime experiment", unit="fit"))
 
     aggregate_and_plot_runtime(demo=demo)
 
@@ -897,35 +988,85 @@ def _leakage_diag(B, Z):
     return L, float(np.max(Lj)), lmin, cond
 
 
-def run_knot_sensitivity(demo=False, warmup=None, samples=None, reps=None):
+# Per-task cache paths (one JSON file per fit), shared by the workers and the
+# break-point pre-filter so completed fits are skipped on resume.
+def _knot_cache(J, rep):
+    return os.path.join(SENS_CACHE_DIR, f"knot_{SENS_SCENARIO_ID}_J{J}_rep{rep}.json")
+
+
+def _prior_cache(i, rep):
+    _, cfg = SENS_PRIOR_CONFIGS[i]
+    return os.path.join(SENS_CACHE_DIR, f"prior_{SENS_SCENARIO_ID}_{_prior_sig(cfg)}_rep{rep}.json")
+
+
+def _misspec_cache(kind, rep):
+    return os.path.join(MISSPEC_CACHE_DIR, f"ms_{kind}_rep{rep}.json")
+
+
+def _knot_one(J, rep, warmup, samples):
+    """One knot-sensitivity fit (cache-or-compute), safe to run in a joblib worker."""
+    cache = _knot_cache(J, rep)
+    if os.path.exists(cache):
+        return json.load(open(cache))
+    scen = _sens_scenario()
+    sim = data_generation.simulate_scenario_data(scen, SENS_SEED + 1000 * rep)
+    T = len(sim["d_t"])
+    Bm = data_generation.generate_bspline_basis(T, J, config.SPLINE_ORDER)
+    data, init = _sens_data_for_sampler(sim, Bm)
+    s = _sens_fit_scfr(data, init, jax.random.PRNGKey(SENS_SEED + J + rep), warmup, samples)
+    fs = fsCFR_model_wrapper(d_t=sim["d_t"], c_t=sim["c_t"], f_s=sim["f_s_true"], Bm=Bm,
+                             intervention_times_abs=list(np.asarray(sim["true_intervention_times_0_abs"]).astype(int)),
+                             intervention_signs=list(np.asarray(sim["beta_signs_true"]).astype(int)), verbose=False)
+    r = dict(J=J, rep=rep,
+             scL=float(np.mean(s["beta_abs"][:, 0])), scS=float(np.mean(s["beta_slope_abs"][:, 0])),
+             fsL=float(fs["fsCFR_beta_abs_est"][0]), fsS=float(fs["fsCFR_beta_slope_abs_est"][0]))
+    json.dump(r, open(cache, "w"))
+    return r
+
+
+def _prior_one(i, rep, warmup, samples):
+    """One prior-sensitivity fit (cache-or-compute), safe to run in a joblib worker."""
+    _, cfg = SENS_PRIOR_CONFIGS[i]
+    cache = _prior_cache(i, rep)
+    if os.path.exists(cache):
+        return json.load(open(cache))
+    scen = _sens_scenario()
+    sim = data_generation.simulate_scenario_data(scen, SENS_SEED + 1000 * rep)
+    Bm = data_generation.generate_bspline_basis(len(sim["d_t"]), config.N_SPLINE_KNOTS_J, config.SPLINE_ORDER)
+    data, init = _sens_data_for_sampler(sim, Bm)
+    s = _sens_fit_scfr(data, init, jax.random.PRNGKey(SENS_SEED + 13 * (i + 1) + rep),
+                       warmup, samples, model_fn=_sens_prior_model(cfg))
+    bL, bS = np.asarray(s["beta_abs"][:, 0]), np.asarray(s["beta_slope_abs"][:, 0])
+    r = dict(i=i, rep=rep, L=float(bL.mean()), S=float(bS.mean()),
+             su=float(np.mean(s["sigma_delta"])), Lsd=float(bL.std()), Ssd=float(bS.std()))
+    json.dump(r, open(cache, "w"))
+    return r
+
+
+def run_knot_sensitivity(demo=False, warmup=None, samples=None, reps=None, n_jobs=None):
     """R2-2: vary spline knots J on a simulation scenario; estimates averaged over
-    independent replicate datasets, reported as mean +/- SD against the known truth."""
+    independent replicate datasets, reported as mean +/- SD against the known truth.
+    Fits run in parallel across replicate datasets (joblib)."""
     os.makedirs(SENS_CACHE_DIR, exist_ok=True)
     warmup = warmup if warmup is not None else config.NUM_WARMUP
     samples = samples if samples is not None else config.NUM_SAMPLES
-    reps = reps if reps is not None else (10 if demo else config.NUM_MONTE_CARLO_RUNS)
+    reps = reps if reps is not None else (10 if demo else config.AUX_NUM_REPLICATIONS)
+    n_jobs = n_jobs if n_jobs is not None else config.NUM_CORES_TO_USE
     scen = _sens_scenario()
     true_L, true_S, _ = _sens_true(scen)
 
     tasks = [(J, rep) for J in SENS_J_GRID for rep in range(reps)]
+    # Break-point pre-filter: dispatch only fits without a cache, compute them in
+    # parallel, then load every result (cached + new) from cache for aggregation.
+    todo = [t for t in tasks if not os.path.exists(_knot_cache(*t))]
+    print(f"[knot ] {len(tasks)} fits; {len(tasks) - len(todo)} cached, {len(todo)} to run (n_jobs={n_jobs}).")
+    if todo:
+        Parallel(n_jobs=n_jobs, backend='loky')(
+            delayed(_knot_one)(J, rep, warmup, samples)
+            for J, rep in tqdm(todo, desc="Knot sensitivity", unit="fit"))
     per_J = {J: {"scL": [], "scS": [], "fsL": [], "fsS": []} for J in SENS_J_GRID}
-    for J, rep in tqdm(tasks, desc="Knot sensitivity", unit="fit"):
-        cache = os.path.join(SENS_CACHE_DIR, f"knot_{SENS_SCENARIO_ID}_J{J}_rep{rep}.json")
-        if os.path.exists(cache):
-            r = json.load(open(cache))
-        else:
-            sim = data_generation.simulate_scenario_data(scen, SENS_SEED + 1000 * rep)
-            T = len(sim["d_t"])
-            Bm = data_generation.generate_bspline_basis(T, J, config.SPLINE_ORDER)
-            data, init = _sens_data_for_sampler(sim, Bm)
-            s = _sens_fit_scfr(data, init, jax.random.PRNGKey(SENS_SEED + J + rep), warmup, samples)
-            fs = fsCFR_model_wrapper(d_t=sim["d_t"], c_t=sim["c_t"], f_s=sim["f_s_true"], Bm=Bm,
-                                     intervention_times_abs=list(np.asarray(sim["true_intervention_times_0_abs"]).astype(int)),
-                                     intervention_signs=list(np.asarray(sim["beta_signs_true"]).astype(int)), verbose=False)
-            r = dict(J=J, rep=rep,
-                     scL=float(np.mean(s["beta_abs"][:, 0])), scS=float(np.mean(s["beta_slope_abs"][:, 0])),
-                     fsL=float(fs["fsCFR_beta_abs_est"][0]), fsS=float(fs["fsCFR_beta_slope_abs_est"][0]))
-            json.dump(r, open(cache, "w"))
+    for (J, rep) in tasks:
+        r = json.load(open(_knot_cache(J, rep)))
         for k in ("scL", "scS", "fsL", "fsS"):
             per_J[J][k].append(r[k])
 
@@ -946,36 +1087,33 @@ def run_knot_sensitivity(demo=False, warmup=None, samples=None, reps=None):
     _write_knot_table(rows, true_L, true_S, reps)
 
 
-def run_prior_sensitivity(demo=False, warmup=None, samples=None, reps=None):
+def run_prior_sensitivity(demo=False, warmup=None, samples=None, reps=None, n_jobs=None):
     """R2-3: vary priors on a simulation scenario; sCFR posterior averaged over
-    independent replicate datasets, reported as mean +/- SD against the known truth."""
+    independent replicate datasets, reported as mean +/- SD against the known truth.
+    Fits run in parallel across the prior-configuration x replicate grid (joblib).
+    This is the heaviest auxiliary experiment (many prior configurations), so the
+    parallelization gives the largest speed-up."""
     os.makedirs(SENS_CACHE_DIR, exist_ok=True)
     warmup = warmup if warmup is not None else config.NUM_WARMUP
     samples = samples if samples is not None else config.NUM_SAMPLES
-    reps = reps if reps is not None else (10 if demo else config.NUM_MONTE_CARLO_RUNS)
+    reps = reps if reps is not None else (10 if demo else config.AUX_NUM_REPLICATIONS)
+    n_jobs = n_jobs if n_jobs is not None else config.NUM_CORES_TO_USE
     scen = _sens_scenario()
     true_L, true_S, true_su = _sens_true(scen)
 
     n_cfg = len(SENS_PRIOR_CONFIGS)
     tasks = [(i, rep) for i in range(n_cfg) for rep in range(reps)]
+    # Break-point pre-filter: dispatch only uncached fits in parallel, then load all.
+    todo = [t for t in tasks if not os.path.exists(_prior_cache(*t))]
+    print(f"[prior] {len(tasks)} fits; {len(tasks) - len(todo)} cached, {len(todo)} to run (n_jobs={n_jobs}).")
+    if todo:
+        Parallel(n_jobs=n_jobs, backend='loky')(
+            delayed(_prior_one)(i, rep, warmup, samples)
+            for i, rep in tqdm(todo, desc="Prior sensitivity", unit="fit"))
     # per config: lists over reps of posterior MEAN and posterior SD of beta_L, beta_S, sigma_u
     per_cfg = {i: {k: [] for k in ("L", "S", "su", "Lsd", "Ssd")} for i in range(n_cfg)}
-    for i, rep in tqdm(tasks, desc="Prior sensitivity", unit="fit"):
-        label, cfg = SENS_PRIOR_CONFIGS[i]
-        cache = os.path.join(SENS_CACHE_DIR, f"prior_{SENS_SCENARIO_ID}_{_prior_sig(cfg)}_rep{rep}.json")
-        if os.path.exists(cache):
-            r = json.load(open(cache))
-        else:
-            sim = data_generation.simulate_scenario_data(scen, SENS_SEED + 1000 * rep)
-            T = len(sim["d_t"])
-            Bm = data_generation.generate_bspline_basis(T, config.N_SPLINE_KNOTS_J, config.SPLINE_ORDER)
-            data, init = _sens_data_for_sampler(sim, Bm)
-            s = _sens_fit_scfr(data, init, jax.random.PRNGKey(SENS_SEED + 13 * (i + 1) + rep),
-                               warmup, samples, model_fn=_sens_prior_model(cfg))
-            bL, bS = np.asarray(s["beta_abs"][:, 0]), np.asarray(s["beta_slope_abs"][:, 0])
-            r = dict(i=i, rep=rep, L=float(bL.mean()), S=float(bS.mean()),
-                     su=float(np.mean(s["sigma_delta"])), Lsd=float(bL.std()), Ssd=float(bS.std()))
-            json.dump(r, open(cache, "w"))
+    for (i, rep) in tasks:
+        r = json.load(open(_prior_cache(i, rep)))
         for k in ("L", "S", "su", "Lsd", "Ssd"):
             per_cfg[i][k].append(r[k])
 
@@ -1094,53 +1232,67 @@ def _logit_mae_p(true_p, est_p):
     return float(np.mean(np.abs(np.log(ec / (1 - ec)) - np.log(tc / (1 - tc)))))
 
 
-def run_misspecification(demo=False, warmup=None, samples=None, reps=None):
+def _misspec_one(kind, rep, kind_idx_val, warmup, samples):
+    """One misspecified-scenario fit (cache-or-compute), safe in a joblib worker."""
+    cache = _misspec_cache(kind, rep)
+    if os.path.exists(cache):
+        return json.load(open(cache))
+    sim = data_generation.simulate_misspecified_data(MISSPEC_SEED + 1000 * rep, kind,
+                                                     nb_size=MISSPEC_NB_SIZE)
+    Bm = sim["Bm_true"]
+    Z_step, Z_hinge = sim["Z_input_true"], sim["Z_hinge_true"]
+    signs = np.asarray(sim["beta_signs_true"], float)
+    # Mirror the main simulation evaluation exactly (evaluation.py): noisy factual and
+    # counterfactual CFR targets on the analysis window [0:T_an), estimates with the
+    # day-level effect retained, logit MAE via clip-then-logit.
+    T_an = config.T_ANALYSIS_LENGTH
+    true_rF = np.asarray(sim["true_r_0_t"])[:T_an]
+    true_rCF = np.asarray(sim["true_rcf_0_t"])[:T_an]
+    data, init = _sens_data_for_sampler(sim, Bm)
+    s = _sens_fit_scfr(data, init, jax.random.PRNGKey(MISSPEC_SEED + 7 * rep + 101 * kind_idx_val),
+                       warmup, samples)
+    lF, lCF = _scfr_traj_logit(s, Bm, Z_step, Z_hinge, signs)   # include u
+    rF_draws = 1.0 / (1.0 + np.exp(-lF)); rCF_draws = 1.0 / (1.0 + np.exp(-lCF))
+    scF = _logit_mae_p(true_rF, rF_draws.mean(0)[:T_an])
+    scCF = _logit_mae_p(true_rCF, rCF_draws.mean(0)[:T_an])
+    lo, hi = np.percentile(rF_draws[:, :T_an], [2.5, 97.5], axis=0)
+    scCov = float(np.mean((true_rF >= lo) & (true_rF <= hi)))
+    fs = fsCFR_model_wrapper(d_t=sim["d_t"], c_t=sim["c_t"], f_s=sim["f_s_true"], Bm=Bm,
+                             intervention_times_abs=[int(sim["true_intervention_times_0_abs"][0])],
+                             intervention_signs=list(signs.astype(int)), verbose=False)
+    fsF = _logit_mae_p(true_rF, np.asarray(fs["fsCFR_factual_mean"])[:T_an])
+    fsCF = _logit_mae_p(true_rCF, np.asarray(fs["fsCFR_counterfactual_mean"])[:T_an])
+    r = dict(kind=kind, rep=rep, scF=scF, scCF=scCF, scCov=scCov, fsF=fsF, fsCF=fsCF)
+    json.dump(r, open(cache, "w"))
+    return r
+
+
+def run_misspecification(demo=False, warmup=None, samples=None, reps=None, n_jobs=None):
     """R2-6: generate data under misspecified DGPs (departing one assumption at a
     time) and compare sCFR and fsCFR recovery of the factual and counterfactual CFR
-    against the known truth, averaged over replicate datasets."""
+    against the known truth, averaged over replicate datasets. Fits run in parallel
+    across the DGP x replicate grid (joblib)."""
     os.makedirs(MISSPEC_CACHE_DIR, exist_ok=True)
     warmup = warmup if warmup is not None else config.NUM_WARMUP
     samples = samples if samples is not None else config.NUM_SAMPLES
-    reps = reps if reps is not None else (10 if demo else config.NUM_MONTE_CARLO_RUNS)
+    reps = reps if reps is not None else (10 if demo else config.AUX_NUM_REPLICATIONS)
+    n_jobs = n_jobs if n_jobs is not None else config.NUM_CORES_TO_USE
 
     kinds = [k for _, k, _ in MISSPEC_KINDS]
     kind_idx = {k: i for i, k in enumerate(kinds)}
     tasks = [(k, rep) for k in kinds for rep in range(reps)]
+    # Break-point pre-filter: dispatch only uncached fits in parallel, then load all.
+    todo = [t for t in tasks if not os.path.exists(_misspec_cache(*t))]
+    print(f"[misspec] {len(tasks)} fits; {len(tasks) - len(todo)} cached, {len(todo)} to run (n_jobs={n_jobs}).")
+    if todo:
+        Parallel(n_jobs=n_jobs, backend='loky')(
+            delayed(_misspec_one)(k, rep, kind_idx[k], warmup, samples)
+            for k, rep in tqdm(todo, desc="Misspecification", unit="fit"))
     acc = {k: {m: [] for m in ("scF", "scCF", "scCov", "fsF", "fsCF")} for k in kinds}
-    for kind, rep in tqdm(tasks, desc="Misspecification", unit="fit"):
-        cache = os.path.join(MISSPEC_CACHE_DIR, f"ms_{kind}_rep{rep}.json")
-        if os.path.exists(cache):
-            r = json.load(open(cache))
-        else:
-            sim = data_generation.simulate_misspecified_data(MISSPEC_SEED + 1000 * rep, kind,
-                                                             nb_size=MISSPEC_NB_SIZE)
-            Bm = sim["Bm_true"]
-            Z_step, Z_hinge = sim["Z_input_true"], sim["Z_hinge_true"]
-            signs = np.asarray(sim["beta_signs_true"], float)
-            # Mirror the main simulation evaluation exactly (evaluation.py): noisy factual
-            # and counterfactual CFR targets on the analysis window [0:T_an), estimates with
-            # the day-level effect retained, logit MAE via clip-then-logit.
-            T_an = config.T_ANALYSIS_LENGTH
-            true_rF = np.asarray(sim["true_r_0_t"])[:T_an]
-            true_rCF = np.asarray(sim["true_rcf_0_t"])[:T_an]
-            data, init = _sens_data_for_sampler(sim, Bm)
-            s = _sens_fit_scfr(data, init, jax.random.PRNGKey(MISSPEC_SEED + 7 * rep + 101 * kind_idx[kind]),
-                               warmup, samples)
-            lF, lCF = _scfr_traj_logit(s, Bm, Z_step, Z_hinge, signs)   # include u
-            rF_draws = 1.0 / (1.0 + np.exp(-lF)); rCF_draws = 1.0 / (1.0 + np.exp(-lCF))
-            scF = _logit_mae_p(true_rF, rF_draws.mean(0)[:T_an])
-            scCF = _logit_mae_p(true_rCF, rCF_draws.mean(0)[:T_an])
-            lo, hi = np.percentile(rF_draws[:, :T_an], [2.5, 97.5], axis=0)
-            scCov = float(np.mean((true_rF >= lo) & (true_rF <= hi)))
-            fs = fsCFR_model_wrapper(d_t=sim["d_t"], c_t=sim["c_t"], f_s=sim["f_s_true"], Bm=Bm,
-                                     intervention_times_abs=[int(sim["true_intervention_times_0_abs"][0])],
-                                     intervention_signs=list(signs.astype(int)), verbose=False)
-            fsF = _logit_mae_p(true_rF, np.asarray(fs["fsCFR_factual_mean"])[:T_an])
-            fsCF = _logit_mae_p(true_rCF, np.asarray(fs["fsCFR_counterfactual_mean"])[:T_an])
-            r = dict(kind=kind, rep=rep, scF=scF, scCF=scCF, scCov=scCov, fsF=fsF, fsCF=fsCF)
-            json.dump(r, open(cache, "w"))
+    for (k, rep) in tasks:
+        r = json.load(open(_misspec_cache(k, rep)))
         for m in ("scF", "scCF", "scCov", "fsF", "fsCF"):
-            acc[kind][m].append(r[m])
+            acc[k][m].append(r[m])
 
     rows = []
     for label, kind, _ in MISSPEC_KINDS:
@@ -1292,6 +1444,64 @@ def run_single_simulation_task(scenario, run_idx, seed):
 # Main Program
 # =============================================================================
 
+def _main_task_complete(scenario_id, run_idx):
+    """A main run is complete (cacheable break-point) when its metrics and benchmark
+    files exist with no recorded error. Mirrors the skip logic in
+    run_single_simulation_task so the task list can be pre-filtered."""
+    metrics_file = os.path.join(config.OUTPUT_DIR_RUN_METRICS_JSON, f"{scenario_id}_run_{run_idx}_metrics.json")
+    benchmark_file = os.path.join(config.OUTPUT_DIR_BENCHMARK_RESULTS, f"{scenario_id}_run_{run_idx}_benchmarks.npz")
+    required = [metrics_file, benchmark_file]
+    if config.SAVE_RAW_POSTERIOR_SAMPLES:
+        required.append(os.path.join(config.OUTPUT_DIR_POSTERIOR_SAMPLES, f"{scenario_id}_run_{run_idx}_posterior.npz"))
+    if not all(os.path.exists(f) for f in required):
+        return False
+    try:
+        with open(metrics_file, 'r') as f:
+            return json.load(f).get('error') in (None, "None")
+    except (json.JSONDecodeError, KeyError, IOError):
+        return False
+
+
+def run_refresh_docs():
+    """Sync docs/figs_tables with the latest results by invoking refresh_docs.main().
+    Wrapped so a refresh failure does not mask a successful simulation run."""
+    print("\n" + "=" * 60)
+    print("REFRESHING docs/figs_tables FROM LATEST RESULTS...")
+    print("=" * 60)
+    try:
+        import refresh_docs
+        refresh_docs.main()
+    except Exception as e:
+        print(f"[Warning] refresh_docs failed: {e}")
+        traceback.print_exc()
+
+
+def run_auxiliary_experiments(demo=False, n_jobs=None):
+    """Run the four auxiliary experiments at the same scale as the main grid:
+    knot sensitivity (Table 3), prior sensitivity (Table 4), misspecification
+    (Table 5), and runtime scaling (Figure 5). Each is independently checkpointed
+    and wrapped so that one failure does not abort the others. Full scale uses
+    config.AUX_NUM_REPLICATIONS replicates for knot/prior/misspec and 100 for
+    runtime; demo uses 10 for each. All four are parallelized over n_jobs; the
+    runtime timing pins each fit to a dedicated core so parallelism does not
+    corrupt the wall-clock measurement."""
+    steps = [
+        ("knot sensitivity (Table 3)", lambda: run_knot_sensitivity(demo=demo, n_jobs=n_jobs)),
+        ("prior sensitivity (Table 4)", lambda: run_prior_sensitivity(demo=demo, n_jobs=n_jobs)),
+        ("misspecification (Table 5)", lambda: run_misspecification(demo=demo, n_jobs=n_jobs)),
+        ("runtime scaling (Figure 5)", lambda: run_runtime_experiment(demo=demo, n_jobs=n_jobs)),
+    ]
+    for name, fn in steps:
+        print("\n" + "=" * 60)
+        print(f"AUXILIARY EXPERIMENT: {name}")
+        print("=" * 60)
+        try:
+            fn()
+        except Exception as e:
+            print(f"[Warning] Auxiliary experiment '{name}' failed: {e}")
+            traceback.print_exc()
+
+
 def main():
     parser = argparse.ArgumentParser(description="sCFR Simulation Runner and Analyzer")
     
@@ -1307,6 +1517,8 @@ def main():
     parser.add_argument('--full', action='store_true', help="Full mode (all configured runs)")
     parser.add_argument('--reset', action='store_true', help="Clear all outputs and restart")
     parser.add_argument('--jobs', type=int, default=config.NUM_CORES_TO_USE, help=f"Number of parallel jobs (default: {config.NUM_CORES_TO_USE})")
+    parser.add_argument('--main-only', action='store_true', help="With --simulate, run only the main 12-scenario grid and skip the auxiliary experiments (knot/prior/misspec/runtime)")
+    parser.add_argument('--no-refresh', action='store_true', help="With --simulate, skip the automatic refresh_docs.py sync of docs/figs_tables at the end")
     
     args = parser.parse_args()
     
@@ -1332,7 +1544,7 @@ def main():
     if args.runtime:
         # Section 3.5 timing experiment. Demo uses the full-scale grid and the
         # production NUTS length, differing from full only in the replicate count (10).
-        run_runtime_experiment(demo=args.demo)
+        run_runtime_experiment(demo=args.demo, n_jobs=args.jobs)
         return
 
     # The added simulation experiments (knot R2-2, prior R2-3, misspec R2-6) use the
@@ -1357,41 +1569,52 @@ def main():
         except Exception as e:
             print(f"[Warning] Runtime figure regeneration skipped: {e}")
     else:
-        tasks = []
         base_seed = config.GLOBAL_BASE_SEED
-        
+
         print("\n[System] Building task list...")
+        all_tasks = []
         for scenario in config.SCENARIOS:
             for i in range(n_runs):
                 scen_idx = int(scenario['id'][1:])
                 current_seed = base_seed + scen_idx * 10000 + i
-                tasks.append((scenario, i, current_seed))
-        
-        total_tasks = len(tasks)
-        print(f"[System] Total tasks: {total_tasks} (Scenarios: {len(config.SCENARIOS)} x Repetitions: {n_runs})")
-        
-        print(f"[System] Starting parallel simulation (Cores: {n_jobs})...")
-        
-        results = Parallel(n_jobs=n_jobs, backend='loky')(
-            delayed(run_single_simulation_task)(scen, idx, seed)
-            for scen, idx, seed in tqdm(tasks, desc="Simulation Progress", unit="run")
-        )
-        
-        skipped_count = results.count(None)
-        failed_count = sum(1 for r in results if r and "Failed" in r)
-        success_count = sum(1 for r in results if r and "Success" in r)
-        
+                all_tasks.append((scenario, i, current_seed))
+
+        # Break-point / cache support: skip main runs already completed (metrics and
+        # benchmark files present with no recorded error). Re-invoking
+        # `--simulate --full` therefore resumes and runs only the missing runs.
+        tasks = [t for t in all_tasks if not _main_task_complete(t[0]['id'], t[1])]
+        precached = len(all_tasks) - len(tasks)
+        print(f"[System] {len(all_tasks)} total runs; {precached} already cached, "
+              f"{len(tasks)} to run (Scenarios: {len(config.SCENARIOS)} x Repetitions: {n_runs}).")
+
+        success_count = 0
+        failed_count = 0
+        if tasks:
+            print(f"[System] Starting parallel simulation (Cores: {n_jobs})...")
+            results = Parallel(n_jobs=n_jobs, backend='loky')(
+                delayed(run_single_simulation_task)(scen, idx, seed)
+                for scen, idx, seed in tqdm(tasks, desc="Simulation Progress", unit="run")
+            )
+            failed_count = sum(1 for r in results if r and "Failed" in r)
+            success_count = sum(1 for r in results if r and "Success" in r)
+        else:
+            print("[System] All main runs already cached; nothing new to run.")
+
+        total_complete = precached + success_count
         print("\n" + "=" * 30)
         print("       SIMULATION SUMMARY       ")
         print("=" * 30)
-        print(f"Total Tasks : {total_tasks}")
-        print(f"Success     : {success_count}")
-        print(f"Skipped     : {skipped_count} (Checkpoints found)")
+        print(f"Total runs  : {len(all_tasks)}")
+        print(f"Cached      : {precached}")
+        print(f"New success : {success_count}")
         print(f"Failed      : {failed_count}")
+        print(f"Completed   : {total_complete}")
         print("=" * 30)
         print(f"Results saved in: {config.OUTPUT_DIR_BASE}")
-        
-        if success_count > 0:
+
+        # Always (re)build the analysis and plots from all completed results, even
+        # when nothing new ran, so the figures and the beta-MAE table reflect the cache.
+        if total_complete > 0:
             print("\n" + "=" * 60)
             print("AUTOMATICALLY STARTING ANALYSIS...")
             print("=" * 60)
@@ -1401,7 +1624,23 @@ def main():
                 print(f"\n[Warning] Analysis failed: {e}")
                 print("You can run 'python simulation.py --analyze' manually.")
         else:
-            print("\n[Warning] No successful simulations. Skipping analysis.")
+            print("\n[Warning] No completed simulations. Skipping analysis.")
+
+        # After the main 12-scenario grid, run the four auxiliary experiments at the
+        # same scale (knot Table 3, prior Table 4, misspec Table 5, runtime Figure 5),
+        # so that `--simulate --full` produces every paper-consumed result in one go.
+        # Each is independently checkpointed, so this resumes and only fills gaps.
+        # Use --main-only to skip them.
+        if not args.main_only:
+            print("\n" + "=" * 60)
+            print("RUNNING AUXILIARY EXPERIMENTS (knot, prior, misspec, runtime)...")
+            print("=" * 60)
+            run_auxiliary_experiments(demo=args.demo, n_jobs=n_jobs)
+
+        # Finally, sync docs/figs_tables with the latest results (figures plus the
+        # data-driven tables), unless --no-refresh is given.
+        if not args.no_refresh:
+            run_refresh_docs()
 
 
 if __name__ == "__main__":

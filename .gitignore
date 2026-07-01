@@ -9,7 +9,7 @@
 /.kiro
 /.vscode
 /.idea
-/_pycache_
+__pycache__/
 *.swp
 *.swo
 *~
