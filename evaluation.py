@@ -368,7 +368,8 @@ def plot_aggregated_factual_summary(aggregated_plot_data: list, output_dir: str)
         axes[row_idx, 0].set_ylabel(f"{row_label}\nCFR", fontsize=16, fontweight='bold')
     for col_idx, int_code in enumerate(int_codes):
         col_label = config.intervention_types_params[int_code]["name"]
-        axes[0, col_idx].set_title(f"{col_label}", fontsize=16, fontweight='bold')
+        sid = next((s["id"] for s in config.SCENARIOS if s["cfr_type_code"] == cfr_codes[0] and s["intervention_type_code"] == int_code), "")
+        axes[0, col_idx].set_title(f"{col_label}\n{sid}" if sid else col_label, fontsize=16, fontweight='bold')
     
     plt.tight_layout()
     output_path = os.path.join(output_dir, "aggregated_factual_summary.png")
@@ -457,7 +458,8 @@ def plot_aggregated_counterfactual_summary(aggregated_plot_data: list, output_di
         axes[row_idx, 0].set_ylabel(f"{row_label}\nCFR", fontsize=16, fontweight='bold')
     for col_idx, int_code in enumerate(int_codes):
         col_label = config.intervention_types_params[int_code]["name"]
-        axes[0, col_idx].set_title(f"{col_label}", fontsize=16, fontweight='bold')
+        sid = next((s["id"] for s in config.SCENARIOS if s["cfr_type_code"] == cfr_codes[0] and s["intervention_type_code"] == int_code), "")
+        axes[0, col_idx].set_title(f"{col_label}\n{sid}" if sid else col_label, fontsize=16, fontweight='bold')
     
     plt.tight_layout()
     output_path = os.path.join(output_dir, "aggregated_counterfactual_summary.png")
@@ -564,7 +566,8 @@ def plot_effectiveness_summary(aggregated_plot_data: list, output_dir: str) -> N
         axes[row_idx, 0].set_ylabel(f"{row_label}\nEffectiveness", fontsize=16, fontweight='bold')
     for col_idx, int_code in enumerate(int_codes):
         col_label = config.intervention_types_params[int_code]["name"]
-        axes[0, col_idx].set_title(f"{col_label}", fontsize=16, fontweight='bold')
+        sid = next((s["id"] for s in config.SCENARIOS if s["cfr_type_code"] == cfr_codes[0] and s["intervention_type_code"] == int_code), "")
+        axes[0, col_idx].set_title(f"{col_label}\n{sid}" if sid else col_label, fontsize=16, fontweight='bold')
 
     plt.tight_layout()
     plt.savefig(os.path.join(output_dir, "effectiveness_summary.png"), dpi=300, bbox_inches='tight')
